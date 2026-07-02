@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>向晴简历｜闲鱼订单发货台</title>
+    <link rel="stylesheet" href="./styles.css">
+  </head>
+  <body class="admin-body">
+    <main class="admin-shell">
+      <header class="admin-head"><span class="brand-mark">晴</span><div><b>闲鱼订单发货台</b><p>确认闲鱼已收款后，再为订单生成一次性兑换码</p></div></header>
+      <section class="admin-card">
+        <div class="admin-warning">本页面仅供卖家使用。兑换码一旦被买家兑换，权益会绑定到该买家的唯一账号。</div>
+        <label><span>后台密钥</span><input id="adminSecret" type="password" placeholder="请输入 ADMIN_SECRET"></label>
+        <label><span>闲鱼订单号</span><input id="xianyuOrder" placeholder="复制闲鱼已付款订单号"></label>
+        <label><span>购买套餐</span><select id="orderPlan"><option value="single">¥2.98 · 单次下载</option><option value="basic">¥19.8 · 30天会员 / 每周35次</option><option value="pro">¥29.8 · 30天无限会员</option></select></label>
+        <button id="generateCode" class="admin-primary">确认已收款，生成兑换码</button>
+        <p class="admin-demo">本机演示默认后台密钥：<code>demo-admin-123456</code>。正式上线必须在 `.env` 设置强随机密钥。</p>
+        <div id="adminResult" class="admin-result" aria-live="polite"></div>
+      </section>
+      <section class="admin-steps"><b>发货流程</b><ol><li>买家在闲鱼完成付款。</li><li>核对订单号、金额和套餐。</li><li>在这里生成兑换码。</li><li>通过闲鱼聊天把兑换码发给买家。</li><li>买家登录网站，在账号中心兑换。</li></ol></section>
+    </main>
+    <script src="./admin.js"></script>
+  </body>
+</html>
