@@ -1,4 +1,7 @@
 .env
+.venv/
+firebase-service-account*.json
+serviceAccountKey.json
 resume_app.db
 __pycache__/
 *.pyc

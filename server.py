@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import secrets
 import sqlite3
+import threading
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -18,6 +20,19 @@ from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
+from urllib.request import Request, urlopen
+
+try:
+    import firebase_admin
+    from firebase_admin import auth as firebase_auth
+except ImportError:
+    firebase_admin = None
+    firebase_auth = None
+
+try:
+    import jwt
+except ImportError:
+    jwt = None
 
 ROOT = Path(__file__).resolve().parent
 DB_PATH = ROOT / "resume_app.db"
@@ -46,6 +61,42 @@ XIANYU_ITEM_URLS = {
     "pro": os.getenv("XIANYU_PRO_URL", "") or XIANYU_ITEM_URL,
 }
 DIRECT_PAYMENT_ENABLED = os.getenv("DIRECT_PAYMENT_ENABLED", "false").lower() == "true"
+FIREBASE_WEB_CONFIG = {
+    "apiKey": os.getenv("FIREBASE_API_KEY", ""),
+    "authDomain": os.getenv("FIREBASE_AUTH_DOMAIN", ""),
+    "projectId": os.getenv("FIREBASE_PROJECT_ID", ""),
+    "appId": os.getenv("FIREBASE_APP_ID", ""),
+    "messagingSenderId": os.getenv("FIREBASE_MESSAGING_SENDER_ID", ""),
+    "storageBucket": os.getenv("FIREBASE_STORAGE_BUCKET", ""),
+}
+FIREBASE_CLIENT_CONFIGURED = all(
+    FIREBASE_WEB_CONFIG[key] for key in ("apiKey", "authDomain", "projectId", "appId")
+)
+FIREBASE_CREDENTIALS_CONFIGURED = bool(
+    os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+    or os.getenv("FIREBASE_USE_APPLICATION_DEFAULT_CREDENTIALS", "false").lower() == "true"
+)
+FIREBASE_ADMIN_READY = False
+if FIREBASE_CLIENT_CONFIGURED and FIREBASE_CREDENTIALS_CONFIGURED and firebase_admin:
+    try:
+        try:
+            firebase_admin.get_app()
+        except ValueError:
+            firebase_admin.initialize_app(options={"projectId": FIREBASE_WEB_CONFIG["projectId"]})
+        FIREBASE_ADMIN_READY = True
+    except Exception as error:
+        print(f"Firebase Admin 初始化失败：{error}")
+FIREBASE_PUBLIC_TOKEN_VERIFY_READY = FIREBASE_CLIENT_CONFIGURED and jwt is not None
+FIREBASE_AUTH_ENABLED = FIREBASE_CLIENT_CONFIGURED and (
+    FIREBASE_ADMIN_READY or FIREBASE_PUBLIC_TOKEN_VERIFY_READY
+)
+FIREBASE_CERTS_URL = (
+    "https://www.googleapis.com/robot/v1/metadata/x509/"
+    "securetoken@system.gserviceaccount.com"
+)
+_firebase_cert_cache: dict[str, str] = {}
+_firebase_cert_cache_expires_at = 0
+_firebase_cert_lock = threading.Lock()
 PLAN_TABLE = {
     "single": {"amount": 2.98, "name": "单次下载"},
     "basic": {"amount": 19.8, "name": "向晴会员"},
@@ -79,6 +130,55 @@ def admin_secret_valid(headers) -> bool:
     return bool(expected) and secrets.compare_digest(headers.get("X-Admin-Secret", ""), expected)
 
 
+def firebase_public_certificates() -> dict[str, str]:
+    """按 Google 的 Cache-Control 有效期缓存 Firebase ID Token 公钥。"""
+    global _firebase_cert_cache, _firebase_cert_cache_expires_at
+    if _firebase_cert_cache and _firebase_cert_cache_expires_at > now():
+        return _firebase_cert_cache
+    with _firebase_cert_lock:
+        if _firebase_cert_cache and _firebase_cert_cache_expires_at > now():
+            return _firebase_cert_cache
+        request = Request(FIREBASE_CERTS_URL, headers={"User-Agent": "resume-of-WK/1.0"})
+        with urlopen(request, timeout=10) as response:
+            certificates = json.loads(response.read().decode("utf-8"))
+            cache_control = response.headers.get("Cache-Control", "")
+        match = re.search(r"max-age=(\d+)", cache_control)
+        max_age = int(match.group(1)) if match else 3600
+        _firebase_cert_cache = certificates
+        _firebase_cert_cache_expires_at = now() + max(300, max_age)
+        return certificates
+
+
+def verify_firebase_id_token(id_token: str) -> dict:
+    """优先使用 Admin SDK；无服务账号时按 Firebase 规范验证公开签名。"""
+    if FIREBASE_ADMIN_READY and firebase_auth:
+        return firebase_auth.verify_id_token(id_token)
+    if not jwt:
+        raise RuntimeError("PYJWT_NOT_INSTALLED")
+    header = jwt.get_unverified_header(id_token)
+    key_id = str(header.get("kid") or "")
+    if header.get("alg") != "RS256" or not key_id:
+        raise ValueError("INVALID_FIREBASE_TOKEN_HEADER")
+    certificate = firebase_public_certificates().get(key_id)
+    if not certificate:
+        raise ValueError("UNKNOWN_FIREBASE_SIGNING_KEY")
+    project_id = FIREBASE_WEB_CONFIG["projectId"]
+    decoded = jwt.decode(
+        id_token,
+        certificate,
+        algorithms=["RS256"],
+        audience=project_id,
+        issuer=f"https://securetoken.google.com/{project_id}",
+        leeway=30,
+        options={"require": ["exp", "iat", "aud", "iss", "sub", "auth_time"]},
+    )
+    subject = str(decoded.get("sub") or "")
+    if not subject or len(subject) > 128 or int(decoded.get("auth_time", 0)) > now() + 30:
+        raise ValueError("INVALID_FIREBASE_TOKEN_CLAIMS")
+    decoded["uid"] = subject
+    return decoded
+
+
 def db() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -90,7 +190,7 @@ def init_db() -> None:
         conn.executescript(
             """
             CREATE TABLE IF NOT EXISTS users (
-              id TEXT PRIMARY KEY, phone TEXT UNIQUE, provider TEXT NOT NULL,
+              id TEXT PRIMARY KEY, phone TEXT UNIQUE, email TEXT UNIQUE, provider TEXT NOT NULL,
               provider_subject TEXT, free_credits INTEGER NOT NULL DEFAULT 3,
               free_credit_date TEXT,
               created_at INTEGER NOT NULL
@@ -124,6 +224,9 @@ def init_db() -> None:
         columns = {row[1] for row in conn.execute("PRAGMA table_info(users)").fetchall()}
         if "free_credit_date" not in columns:
             conn.execute("ALTER TABLE users ADD COLUMN free_credit_date TEXT")
+        if "email" not in columns:
+            conn.execute("ALTER TABLE users ADD COLUMN email TEXT")
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email) WHERE email IS NOT NULL")
 
 
 def refresh_daily_free_credits(conn: sqlite3.Connection, user_id: str):
@@ -229,12 +332,19 @@ class Handler(SimpleHTTPRequestHandler):
         if path == "/api/config":
             return self.reply({
                 "demoMode": DEMO_MODE,
-                "auth": {"sms": False, "wechat": False, "apple": False},
+                "auth": {
+                    "firebase": FIREBASE_AUTH_ENABLED,
+                    "email": FIREBASE_AUTH_ENABLED,
+                    "sms": False,
+                    "wechat": False,
+                    "apple": False,
+                },
+                "firebase": FIREBASE_WEB_CONFIG if FIREBASE_AUTH_ENABLED else None,
                 "redemptionEnabled": True,
                 "xianyuItemUrl": XIANYU_ITEM_URL,
                 "xianyuItemUrls": XIANYU_ITEM_URLS,
                 "directPaymentEnabled": DIRECT_PAYMENT_ENABLED,
-                "message": "真实登录服务尚未配置" if DEMO_MODE else "登录服务需要正式凭证"
+                "message": "Firebase 邮箱认证已启用" if FIREBASE_AUTH_ENABLED else "Firebase 登录需要完整 Web 配置和令牌验证依赖"
             })
         if path in ("/api/auth/oauth/wechat/start", "/api/auth/oauth/apple/start"):
             return self.reply({"error": "OAUTH_PROVIDER_NOT_CONFIGURED"}, HTTPStatus.SERVICE_UNAVAILABLE)
@@ -263,6 +373,50 @@ class Handler(SimpleHTTPRequestHandler):
             body = self.json_body()
         except Exception:
             return self.reply({"error": "INVALID_JSON"}, HTTPStatus.BAD_REQUEST)
+
+        if path == "/api/auth/firebase/session":
+            if not FIREBASE_AUTH_ENABLED:
+                return self.reply({"error": "FIREBASE_AUTH_NOT_CONFIGURED"}, HTTPStatus.SERVICE_UNAVAILABLE)
+            id_token = str(body.get("id_token", "")).strip()
+            if not id_token:
+                return self.reply({"error": "FIREBASE_ID_TOKEN_REQUIRED"}, HTTPStatus.BAD_REQUEST)
+            try:
+                decoded = verify_firebase_id_token(id_token)
+            except Exception as error:
+                print(f"Firebase ID Token 验证失败：{error}")
+                return self.reply({"error": "INVALID_FIREBASE_ID_TOKEN"}, HTTPStatus.UNAUTHORIZED)
+
+            firebase_uid = str(decoded.get("uid") or decoded.get("sub") or "").strip()
+            email = str(decoded.get("email") or "").strip().lower()
+            raw_phone = str(decoded.get("phone_number") or "").strip()
+            phone = raw_phone[3:] if raw_phone.startswith("+86") else raw_phone.lstrip("+")
+            if not firebase_uid or (not phone and not email):
+                return self.reply({"error": "FIREBASE_IDENTITY_REQUIRED"}, HTTPStatus.BAD_REQUEST)
+
+            with db() as conn:
+                user = conn.execute(
+                    "SELECT * FROM users WHERE provider=? AND provider_subject=?",
+                    ("firebase", firebase_uid),
+                ).fetchone()
+                if not user:
+                    user = conn.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone() if email else None
+                    if not user and phone:
+                        user = conn.execute("SELECT * FROM users WHERE phone=?", (phone,)).fetchone()
+                    if user:
+                        conn.execute(
+                            "UPDATE users SET provider=?,provider_subject=?,email=COALESCE(email,?),phone=COALESCE(phone,?) WHERE id=?",
+                            ("firebase", firebase_uid, email or None, phone or None, user["id"]),
+                        )
+                    else:
+                        user_id = f"usr_{uuid.uuid4().hex[:16]}"
+                        conn.execute(
+                            "INSERT INTO users(id,phone,email,provider,provider_subject,free_credits,free_credit_date,created_at) VALUES(?,?,?,?,?,3,?,?)",
+                            (user_id, phone or None, email or None, "firebase", firebase_uid, china_date_key(), now()),
+                        )
+                        user = conn.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+                user = refresh_daily_free_credits(conn, user["id"])
+                token = create_session(conn, user["id"])
+                return self.reply({"token": token, "user": row_dict(user)})
 
         if path == "/api/auth/sms/send":
             phone = str(body.get("phone", ""))
@@ -463,5 +617,8 @@ class Handler(SimpleHTTPRequestHandler):
 if __name__ == "__main__":
     init_db()
     port = int(os.getenv("PORT", "4173"))
-    print(f"向晴简历：http://127.0.0.1:{port}  DEMO_MODE={DEMO_MODE}")
+    print(
+        f"向晴简历：http://127.0.0.1:{port}  "
+        f"DEMO_MODE={DEMO_MODE}  FIREBASE_AUTH={FIREBASE_AUTH_ENABLED}"
+    )
     ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()

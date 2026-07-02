@@ -584,11 +584,21 @@ button { color: inherit; }
 .login-field > div { display: grid; grid-template-columns: 50px 1fr; border: 1px solid var(--line); background: #fbfaf7; border-radius: 13px; overflow: hidden; }
 .login-field > div > span { display: grid; place-items: center; border-right: 1px solid var(--line); color: var(--muted); font-size: 11px; }
 .login-field input { border: 0; outline: 0; background: transparent; padding: 14px; }
+.credential-field { margin-bottom: 11px; }
+.credential-field > div { grid-template-columns: 1fr; }
+.credential-field input { width: 100%; }
+.credential-tip { margin: -2px 2px 7px; text-align: left; color: #7a8982; font-size: 9px; line-height: 1.55; }
 .login-field.has-error > div { border-color: #df6b58; background: #fff8f5; box-shadow: 0 0 0 3px rgba(223,107,88,.09); }
 .login-inline-error { margin: 7px 2px 0; color: #c44f3d; background: #fff0ec; border-radius: 8px; padding: 8px 10px; text-align: left; font-size: 10px; font-weight: 700; animation: errorNudge .28s ease both; }
 .login-inline-error.code-error { text-align: center; margin-bottom: 2px; }
 .code-input.has-error { border-color: #df6b58; background: #fff8f5; }
 .login-primary { width: 100%; border: 0; border-radius: 999px; background: var(--green); color: white; padding: 14px; font-weight: 800; cursor: pointer; margin-top: 13px; }
+.auth-secondary-actions { display: flex; justify-content: center; gap: 14px; margin-top: 12px; }
+.auth-secondary-actions button { border: 0; background: transparent; color: var(--green); font-size: 9px; cursor: pointer; }
+.jd-reminder { display: grid; gap: 5px; margin: -2px 0 14px; padding: 12px 14px; border: 1px solid #ead8aa; border-radius: 12px; background: #fff8e7; color: #765d28; }
+.jd-reminder b { font-size: 10px; }
+.jd-reminder p { margin: 0; font-size: 9px; line-height: 1.65; }
+.firebase-recaptcha { min-height: 0; overflow: hidden; }
 .login-divider { display: flex; align-items: center; gap: 10px; margin: 23px 0 14px; color: #a1a6a3; font-size: 9px; }
 .login-divider::before, .login-divider::after { content: ""; height: 1px; flex: 1; background: var(--line); }
 .social-login { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }

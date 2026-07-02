@@ -8,7 +8,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Noto+Sans+SC:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
-    <link rel="stylesheet" href="./styles.css" />
+    <link rel="stylesheet" href="./styles.css?v=20260702-email-auth-2" />
   </head>
   <body>
     <div class="nature-bg" aria-hidden="true">
@@ -42,7 +42,7 @@
         <h2 id="helpTitle">你只需要准备两样东西</h2>
         <div class="help-grid">
           <div><b>01</b><p>你现有的简历，Word、PDF 或 TXT 都可以。</p></div>
-          <div><b>02</b><p>一份想投递的岗位 JD，复制职位描述即可。</p></div>
+          <div><b>02</b><p>本次即将投递公司的具体岗位 JD；每次更换公司或岗位都要重新填写。</p></div>
         </div>
         <p class="privacy-note">🔒 你的资料只用于本次简历优化，不会公开展示。</p>
       </div>
@@ -50,6 +50,8 @@
 
     <script src="./vendor/pdf.min.js"></script>
     <script src="./vendor/mammoth.browser.min.js"></script>
-    <script src="./app.js"></script>
+    <script src="./firebase-config.js?v=20260702-email-auth-2"></script>
+    <script src="./firebase-auth.js?v=20260702-email-auth-2"></script>
+    <script src="./app.js?v=20260702-email-auth-2"></script>
   </body>
 </html>

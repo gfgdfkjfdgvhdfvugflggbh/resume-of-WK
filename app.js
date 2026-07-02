@@ -2,13 +2,16 @@ const app = document.querySelector('#app');
 const toast = document.querySelector('#toast');
 const helpDialog = document.querySelector('#helpDialog');
 const backendMode = location.protocol === 'http:' || location.protocol === 'https:';
+let serverApiReady = false;
 let authToken = localStorage.getItem('sunny-auth-token') || '';
 let cachedServerOrders = [];
 let paymentPollTimer = null;
 let appConfig = {
   loaded: !backendMode,
-  demoMode: !backendMode,
-  auth: { sms: false, wechat: false, apple: false },
+  demoMode: false,
+  auth: { firebase: true, email: true, sms: false, wechat: false, apple: false },
+  firebase: window.FIREBASE_CONFIG || null,
+  firebaseReady: false,
   directPaymentEnabled: false,
   xianyuItemUrl: '',
   xianyuItemUrls: {}
@@ -38,8 +41,9 @@ function normalizeServerUser(user) {
   return {
     id: user.id,
     phone: user.phone || '',
+    email: user.email || '',
     provider: user.provider,
-    displayName: user.phone ? maskPhone(user.phone) : user.provider === 'wechat' ? '微信用户' : 'Apple 用户',
+    displayName: user.email || (user.phone ? maskPhone(user.phone) : user.provider === 'wechat' ? '微信用户' : 'Apple 用户'),
     freeCredits: Number(user.free_credits ?? user.freeCredits ?? 0),
     freeCreditDate: user.free_credit_date || user.freeCreditDate || chinaDateKey(),
     createdAt: Number(user.created_at || Date.now()) * (user.created_at ? 1000 : 1)
@@ -72,7 +76,7 @@ function normalizeServerOrder(order) {
 }
 
 async function syncServerSession() {
-  if (!backendMode || !authToken) return false;
+  if (!serverApiReady || !authToken) return false;
   try {
     const data = await apiRequest('/api/me');
     state.user = normalizeServerUser(data.user);
@@ -95,12 +99,41 @@ async function syncServerSession() {
 }
 
 async function loadAppConfig() {
-  if (!backendMode) return appConfig;
+  let serverConfig = {};
   try {
-    const config = await apiRequest('/api/config');
-    appConfig = { ...config, loaded: true };
-  } catch (_) {
-    appConfig = { loaded: true, demoMode: true, auth: { sms: false, wechat: false, apple: false } };
+    if (backendMode) {
+      const candidate = await apiRequest('/api/config');
+      if (candidate?.auth) {
+        serverConfig = candidate;
+        serverApiReady = true;
+      }
+    }
+  } catch (_) {}
+
+  const firebaseConfig = serverConfig.firebase || window.FIREBASE_CONFIG || null;
+  appConfig = {
+    ...appConfig,
+    ...serverConfig,
+    loaded: true,
+    demoMode: false,
+    firebase: firebaseConfig,
+    serverAuthEnabled: Boolean(serverConfig.auth?.firebase),
+    auth: {
+      ...(serverConfig.auth || {}),
+      firebase: Boolean(firebaseConfig),
+      email: Boolean(firebaseConfig),
+      sms: false,
+      wechat: false,
+      apple: false
+    }
+  };
+  if (appConfig.auth.firebase && window.firebaseAuthClient) {
+    try {
+      appConfig.firebaseReady = await window.firebaseAuthClient.initialize(firebaseConfig);
+    } catch (error) {
+      console.error('Firebase Authentication 初始化失败', error);
+      appConfig.firebaseReady = false;
+    }
   }
   return appConfig;
 }
@@ -125,12 +158,11 @@ const plans = {
   pro: { id: 'pro', name: '向晴无限会员', price: 29.8, unit: '月', note: '每天不限优化次数' }
 };
 
-if (backendMode && !authToken) state.user = null;
 state.entitlement = loadEntitlement(state.user?.id);
 
 let paymentState = { plan: 'single', method: 'wechat', stage: 'choose', orderNo: '', qrCode: '', demo: !backendMode, downloadFormat: 'word' };
 let pendingAfterLogin = null;
-let loginState = { stage: 'phone', phone: '', sentCode: '', error: '' };
+let loginState = { stage: 'credentials', mode: 'signin', email: '', error: '' };
 
 const icons = {
   graduate: '🎓', experienced: '🧭', upload: '↥'
@@ -144,7 +176,7 @@ function loadCurrentUser() {
       localStorage.removeItem('sunny-current-user');
       return null;
     }
-    if (user && !backendMode) refreshLocalDailyCredits(user);
+    if (user) refreshLocalDailyCredits(user);
     return user;
   } catch (_) {
     return null;
@@ -167,7 +199,7 @@ function updateAccountHeader() {
     quota.className = 'quota-pill';
     return;
   }
-  button.textContent = state.user.displayName || maskPhone(state.user.phone) || '我的账号';
+  button.textContent = state.user.displayName || state.user.email || maskPhone(state.user.phone) || '我的账号';
   const access = getDownloadAccess();
   quota.textContent = state.user.freeCredits > 0 ? `今日免费额度 ${state.user.freeCredits} 次` : (access.allowed ? access.description : '今日免费额度已用完');
   quota.className = `quota-pill ${state.user.freeCredits > 0 ? 'has-credit' : ''}`;
@@ -175,6 +207,20 @@ function updateAccountHeader() {
 
 function maskPhone(phone = '') {
   return phone ? phone.replace(/(\d{3})\d{4}(\d{4})/, '$1****$2') : '';
+}
+
+function firebaseAuthErrorMessage(error) {
+  const code = error?.code || error?.message || '';
+  if (code.includes('invalid-email')) return '邮箱格式不正确，请检查后重试';
+  if (code.includes('email-already-in-use')) return '这个邮箱已经注册，请直接登录';
+  if (code.includes('weak-password')) return '密码至少需要 6 位，请换一个更安全的密码';
+  if (code.includes('invalid-credential') || code.includes('wrong-password') || code.includes('user-not-found')) return '邮箱或密码不正确';
+  if (code.includes('user-disabled')) return '这个账号已被停用，请联系管理员';
+  if (code.includes('operation-not-allowed')) return 'Firebase 控制台尚未启用“邮箱/密码”登录';
+  if (code.includes('unauthorized-domain')) return '当前域名未加入 Firebase Authentication 授权网域';
+  if (code.includes('too-many-requests')) return '请求过于频繁，请稍后再试';
+  if (code.includes('network-request-failed')) return '网络连接失败，请稍后重试';
+  return '认证失败，请稍后重试';
 }
 
 function chinaDateKey(date = new Date()) {
@@ -343,8 +389,9 @@ function renderForm() {
             <div class="field"><label>目标行业</label><input name="industry" value="${escapeHTML(state.form.industry)}" placeholder="例如：互联网 / 新能源"></div>
           </div>
 
-          <h2 class="section-title"><span>3</span> 粘贴目标岗位 JD</h2>
-          <div class="field full"><label>岗位描述 <i class="required">*</i></label><textarea name="jd" placeholder="把招聘平台上的岗位职责、任职要求粘贴到这里。越完整，优化越精准。" required>${escapeHTML(state.form.jd)}</textarea></div>
+          <h2 class="section-title"><span>3</span> 填写本次即将投递的岗位 JD</h2>
+          <div class="jd-reminder"><b>每次投递，都请重新填写</b><p>这里要填写你这一次即将投递的具体公司、具体岗位 JD。不同公司的同名岗位要求也可能不同；更换公司或岗位后，请粘贴新的 JD，系统不会沿用上一次内容。</p></div>
+          <div class="field full"><label>本次投递公司的完整岗位 JD <i class="required">*</i></label><textarea name="jd" placeholder="请粘贴本次即将投递岗位的完整 JD，包括公司/岗位名称、岗位职责、任职要求等。内容越完整，优化越精准。" required>${escapeHTML(state.form.jd)}</textarea></div>
 
           <div class="form-actions">
             <span class="form-hint">🔒 资料仅用于本次优化</span>
@@ -650,8 +697,8 @@ async function copyResume() {
 
 async function openLoginModal() {
   await loadAppConfig();
-  if (backendMode && authToken) await syncServerSession();
-  loginState = { stage: state.user ? 'account' : 'phone', phone: '', sentCode: '', error: '' };
+  if (serverApiReady && authToken) await syncServerSession();
+  loginState = { stage: state.user ? 'account' : 'credentials', mode: 'signin', email: state.user?.email || '', error: '' };
   const overlay = document.createElement('div');
   overlay.className = 'login-overlay';
   overlay.id = 'loginOverlay';
@@ -662,36 +709,26 @@ async function openLoginModal() {
 function renderLoginModal() {
   const overlay = document.querySelector('#loginOverlay');
   if (!overlay) return;
-  const testAuth = appConfig.demoMode || !backendMode;
-  const smsReady = Boolean(appConfig.auth?.sms) || testAuth;
-  if (loginState.stage === 'phone') {
+  const firebaseReady = Boolean(appConfig.auth?.firebase && appConfig.firebaseReady);
+  if (loginState.stage === 'credentials') {
+    const isSignup = loginState.mode === 'signup';
     overlay.innerHTML = `
       <section class="login-sheet" role="dialog" aria-modal="true" aria-labelledby="loginTitle">
         <button class="payment-close" data-login-action="close" aria-label="关闭登录">×</button>
         <div class="login-brand"><span class="brand-mark">晴</span><b>向晴简历</b></div>
-        ${testAuth ? '<div class="auth-mode-warning">测试账号模式 · 不代表已验证真实身份</div>' : ''}
-        <h2 id="loginTitle">${testAuth ? '使用测试账号体验登录' : '登录后，每天领取 3 次免费下载'}</h2>
-        <p class="login-lead">${testAuth ? '仍需输入手机号和验证码两步确认；测试数据只用于本机联调。' : '账号用于保存免费额度、订单和会员权益。换设备登录，权益也能跟着你。'}</p>
-        <label class="login-field ${loginState.error ? 'has-error' : ''}"><span>${testAuth ? '测试账号手机号' : '手机号码'}</span><div><span>+86</span><input id="loginPhone" inputmode="numeric" maxlength="11" value="${escapeHTML(loginState.phone)}" placeholder="请输入 11 位手机号码" ${smsReady ? '' : 'disabled'}></div></label>
+        <h2 id="loginTitle">${isSignup ? '创建你的账号' : '欢迎回来'}</h2>
+        <p class="login-lead">${isSignup ? '邮箱注册无需验证码。请为“向晴简历”自行创建一个至少 6 位的新密码，注册后每天可领取 3 次免费下载。' : '使用注册邮箱和你创建的密码登录，继续你的简历优化。'}</p>
+        <label class="login-field credential-field ${loginState.error ? 'has-error' : ''}"><span>邮箱</span><div><input id="loginEmail" type="email" autocomplete="email" value="${escapeHTML(loginState.email)}" placeholder="name@example.com" ${firebaseReady ? '' : 'disabled'}></div></label>
+        <label class="login-field credential-field ${loginState.error ? 'has-error' : ''}"><span>${isSignup ? '自行创建密码' : '密码'}</span><div><input id="loginPassword" type="password" minlength="6" autocomplete="${isSignup ? 'new-password' : 'current-password'}" placeholder="${isSignup ? '请创建至少 6 位的新密码' : '请输入注册时创建的密码'}" ${firebaseReady ? '' : 'disabled'}></div></label>
+        ${isSignup ? '<label class="login-field credential-field"><span>再次确认密码</span><div><input id="loginPasswordConfirm" type="password" minlength="6" autocomplete="new-password" placeholder="请再次输入刚刚创建的密码"></div></label><p class="credential-tip">无需输入邮箱验证码，这个密码只用于登录向晴简历。</p>' : ''}
         ${loginState.error ? `<div class="login-inline-error">⚠ ${escapeHTML(loginState.error)}</div>` : ''}
-        <button class="login-primary" data-login-action="send-code" ${smsReady ? '' : 'disabled'}>${testAuth ? '获取测试验证码' : smsReady ? '获取短信验证码' : '短信登录待接入'}</button>
-        <div class="login-divider"><span>或使用快捷方式登录</span></div>
-        <div class="social-login"><button ${appConfig.auth?.wechat ? 'data-provider="wechat"' : 'disabled'}><span class="wechat-icon">微</span><span>微信登录<small>${appConfig.auth?.wechat ? '' : '待接入'}</small></span></button><button ${appConfig.auth?.apple ? 'data-provider="apple"' : 'disabled'}><span class="apple-icon">●</span><span>Apple ID<small>${appConfig.auth?.apple ? '' : '待接入'}</small></span></button></div>
-        <p class="login-terms">${testAuth ? '当前不会调用微信或 Apple，也不会把点击按钮视为真实登录。' : '登录即表示同意《用户协议》和《隐私政策》。'}</p>
-      </section>`;
-  }
-  if (loginState.stage === 'code') {
-    overlay.innerHTML = `
-      <section class="login-sheet code-sheet" role="dialog" aria-modal="true" aria-labelledby="codeTitle">
-        <button class="payment-close" data-login-action="close" aria-label="关闭登录">×</button>
-        <button class="pay-back" data-login-action="back">← 修改手机号</button>
-        <div class="sms-illustration">•••</div>
-        <h2 id="codeTitle">输入${testAuth ? '测试' : '手机'}验证码</h2>
-        <p class="login-lead">验证码已发送至 +86 ${maskPhone(loginState.phone)}</p>
-        <input class="code-input ${loginState.error ? 'has-error' : ''}" id="loginCode" inputmode="numeric" maxlength="6" placeholder="请输入 6 位验证码" autocomplete="one-time-code">
-        ${loginState.error ? `<div class="login-inline-error code-error">⚠ ${escapeHTML(loginState.error)}</div>` : ''}
-        ${loginState.sentCode ? `<div class="demo-code">本地演示验证码：<b>${loginState.sentCode}</b></div>` : '<div class="demo-code sms-sent">验证码已发送，请查看手机短信</div>'}
-        <button class="login-primary" data-login-action="verify-code">确认登录</button>
+        <button class="login-primary" data-login-action="submit-email-auth" ${firebaseReady ? '' : 'disabled'}>${isSignup ? '注册并登录' : '登录'}</button>
+        <div class="auth-secondary-actions">
+          <button type="button" data-login-action="toggle-auth-mode">${isSignup ? '已有账号？直接登录' : '没有账号？免费注册'}</button>
+          ${isSignup ? '' : '<button type="button" data-login-action="reset-password">忘记密码</button>'}
+        </div>
+        ${firebaseReady ? '' : '<div class="login-inline-error">认证服务加载失败，请刷新页面或检查网络</div>'}
+        <p class="login-terms">继续即表示同意《用户协议》和《隐私政策》。账号认证由 Firebase 安全处理。</p>
       </section>`;
   }
   if (loginState.stage === 'account' && state.user) {
@@ -701,8 +738,8 @@ function renderLoginModal() {
     overlay.innerHTML = `
       <section class="login-sheet account-sheet" role="dialog" aria-modal="true" aria-labelledby="accountTitle">
         <button class="payment-close" data-login-action="close" aria-label="关闭账号中心">×</button>
-        <div class="account-avatar">${state.user.provider === 'phone' ? '晴' : state.user.provider === 'wechat' ? '微' : 'A'}</div>
-        <h2 id="accountTitle">${escapeHTML(state.user.displayName || maskPhone(state.user.phone))}</h2>
+        <div class="account-avatar">${['phone', 'firebase'].includes(state.user.provider) ? '晴' : state.user.provider === 'wechat' ? '微' : 'A'}</div>
+        <h2 id="accountTitle">${escapeHTML(state.user.displayName || state.user.email || maskPhone(state.user.phone))}</h2>
         <p class="account-id">用户 ID：${escapeHTML(state.user.id)}</p>
         <div class="account-benefits"><div><span>今日剩余免费额度</span><strong>${state.user.freeCredits || 0}<i> 次</i></strong></div><div><span>当前会员</span><strong>${memberName}</strong></div></div>
         <div class="redeem-card"><div><b>闲鱼兑换码</b><small>已在闲鱼付款？把卖家发给你的兑换码填在这里。</small></div><div><input id="redeemCode" maxlength="20" placeholder="例如 XQ-ABCD-EFGH-JKLM"><button data-login-action="redeem">确认兑换</button></div><p id="redeemError"></p></div>
@@ -717,64 +754,86 @@ function renderLoginModal() {
 function bindLoginActions() {
   const overlay = document.querySelector('#loginOverlay');
   if (!overlay) return;
+  const useFirebase = Boolean(appConfig.auth?.firebase && appConfig.firebaseReady);
   overlay.querySelectorAll('[data-login-action]').forEach(button => button.addEventListener('click', async () => {
     const action = button.dataset.loginAction;
-    if (action === 'close') { pendingAfterLogin = null; overlay.remove(); }
-    if (action === 'back') { loginState.stage = 'phone'; loginState.error = ''; renderLoginModal(); }
-    if (action === 'send-code') {
-      const phone = overlay.querySelector('#loginPhone')?.value.trim() || '';
-      if (!/^1[3-9]\d{9}$/.test(phone)) {
-        loginState.phone = phone;
-        loginState.error = '调皮的小宝宝手机号交出来';
+    if (action === 'close') {
+      pendingAfterLogin = null;
+      overlay.remove();
+    }
+    if (action === 'toggle-auth-mode') {
+      const email = overlay.querySelector('#loginEmail')?.value.trim() || loginState.email;
+      loginState = {
+        stage: 'credentials',
+        mode: loginState.mode === 'signup' ? 'signin' : 'signup',
+        email,
+        error: ''
+      };
+      renderLoginModal();
+    }
+    if (action === 'submit-email-auth') {
+      const email = overlay.querySelector('#loginEmail')?.value.trim().toLowerCase() || '';
+      const password = overlay.querySelector('#loginPassword')?.value || '';
+      const passwordConfirm = overlay.querySelector('#loginPasswordConfirm')?.value || '';
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        loginState.email = email;
+        loginState.error = '请输入正确的邮箱地址';
+        renderLoginModal();
+        return;
+      }
+      if (password.length < 6) {
+        loginState.email = email;
+        loginState.error = '密码至少需要 6 位';
+        renderLoginModal();
+        return;
+      }
+      if (loginState.mode === 'signup' && password !== passwordConfirm) {
+        loginState.email = email;
+        loginState.error = '两次输入的密码不一致，请重新确认';
+        renderLoginModal();
+        return;
+      }
+      if (!useFirebase) {
+        loginState.error = 'Firebase 认证服务尚未加载完成';
         renderLoginModal();
         return;
       }
       button.disabled = true;
-      button.textContent = '正在发送…';
+      button.textContent = loginState.mode === 'signup' ? '正在创建账号…' : '正在登录…';
       try {
-        const result = backendMode ? await apiRequest('/api/auth/sms/send', { method: 'POST', body: { phone } }) : { demo_code: '123456' };
-        loginState = { stage: 'code', phone, sentCode: result.demo_code || '', error: '' };
-      } catch (_) {
-        loginState.phone = phone;
-        loginState.error = '验证码发送失败，请稍后再试一下';
+        const firebaseUser = loginState.mode === 'signup'
+          ? await window.firebaseAuthClient.signUpWithEmail(email, password)
+          : await window.firebaseAuthClient.signInWithEmail(email, password);
+        await completeFirebaseAuthentication(firebaseUser, loginState.mode === 'signup');
+      } catch (error) {
+        loginState.email = email;
+        loginState.error = firebaseAuthErrorMessage(error);
         renderLoginModal();
-        return;
       }
-      renderLoginModal();
     }
-    if (action === 'verify-code') {
-      const code = overlay.querySelector('#loginCode')?.value.trim() || '';
-      if (!/^\d{6}$/.test(code)) {
-        loginState.error = '请输入完整的 6 位验证码';
+    if (action === 'reset-password') {
+      const email = overlay.querySelector('#loginEmail')?.value.trim().toLowerCase() || '';
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        loginState.email = email;
+        loginState.error = '请先填写注册时使用的邮箱';
         renderLoginModal();
         return;
       }
-      if (backendMode) {
-        button.disabled = true;
-        button.textContent = '正在登录…';
-        try {
-          const result = await apiRequest('/api/auth/sms/verify', { method: 'POST', body: { phone: loginState.phone, code } });
-          authToken = result.token;
-          localStorage.setItem('sunny-auth-token', authToken);
-          await completeServerLogin(result.user);
-        } catch (_) {
-          loginState.error = '验证码不正确或已经过期';
-          renderLoginModal();
-        }
-      } else {
-        if (code !== loginState.sentCode) {
-          loginState.error = '验证码不正确，请输入页面显示的测试验证码';
-          renderLoginModal();
-          return;
-        }
-        completeLogin({ id: `phone_${loginState.phone}`, phone: loginState.phone, provider: 'phone', displayName: maskPhone(loginState.phone) });
+      button.disabled = true;
+      try {
+        await window.firebaseAuthClient.sendPasswordReset(email);
+        showToast('密码重置邮件已发送，请检查邮箱');
+      } catch (error) {
+        loginState.email = email;
+        loginState.error = firebaseAuthErrorMessage(error);
+        renderLoginModal();
       }
     }
     if (action === 'logout') logoutUser();
     if (action === 'redeem') {
       const code = overlay.querySelector('#redeemCode')?.value.trim().toUpperCase() || '';
       const errorBox = overlay.querySelector('#redeemError');
-      if (!backendMode) {
+      if (!serverApiReady) {
         errorBox.textContent = '兑换码需要通过完整服务器链接使用';
         return;
       }
@@ -796,22 +855,52 @@ function bindLoginActions() {
       }
     }
   }));
-  overlay.querySelectorAll('[data-provider]').forEach(button => button.addEventListener('click', () => completeProviderLogin(button.dataset.provider)));
-  overlay.addEventListener('click', event => { if (event.target === overlay) { pendingAfterLogin = null; overlay.remove(); } });
+  overlay.addEventListener('click', event => {
+    if (event.target === overlay) {
+      pendingAfterLogin = null;
+      overlay.remove();
+    }
+  });
+}
+
+async function completeFirebaseAuthentication(firebaseUser, isRegistration = false, silent = false) {
+  if (serverApiReady && appConfig.serverAuthEnabled) {
+    try {
+      const result = await apiRequest('/api/auth/firebase/session', {
+        method: 'POST',
+        body: { id_token: firebaseUser.idToken }
+      });
+      if (!result?.token || !result?.user) throw Object.assign(new Error('BACKEND_UNAVAILABLE'), { status: 404 });
+      authToken = result.token;
+      localStorage.setItem('sunny-auth-token', authToken);
+      await completeServerLogin(result.user, silent);
+      return;
+    } catch (error) {
+      if (![404, 405, 503].includes(error.status)) throw error;
+    }
+  }
+
+  completeLogin({
+    id: `firebase_${firebaseUser.uid}`,
+    email: firebaseUser.email,
+    phone: '',
+    provider: 'firebase',
+    displayName: firebaseUser.displayName || firebaseUser.email
+  }, { isRegistration, silent });
 }
 
 async function completeProviderLogin(provider) {
-  if (!backendMode || !appConfig.auth?.[provider]) {
+  if (!serverApiReady || !appConfig.auth?.[provider]) {
     return showToast(`${provider === 'wechat' ? '微信' : 'Apple'} 真实登录尚未配置，不能创建虚拟用户`);
   }
   location.href = `/api/auth/oauth/${provider}/start`;
 }
 
-async function completeServerLogin(user) {
+async function completeServerLogin(user, silent = false) {
   state.user = normalizeServerUser(user);
   await syncServerSession();
   document.querySelector('#loginOverlay')?.remove();
-  showToast(`登录成功，今日免费额度剩余 ${state.user?.freeCredits ?? 0} 次`);
+  if (!silent) showToast(`登录成功，今日免费额度剩余 ${state.user?.freeCredits ?? 0} 次`);
   if (pendingAfterLogin?.startsWith('download:')) {
     const format = pendingAfterLogin.split(':')[1] || 'word';
     pendingAfterLogin = null;
@@ -819,14 +908,14 @@ async function completeServerLogin(user) {
   }
 }
 
-function completeLogin(identity) {
+function completeLogin(identity, { isRegistration = false, silent = false } = {}) {
   const existing = (() => { try { return JSON.parse(localStorage.getItem(`sunny-user-${identity.id}`)); } catch (_) { return null; } })();
   state.user = existing ? refreshLocalDailyCredits(existing) : { ...identity, freeCredits: 3, freeCreditDate: chinaDateKey(), createdAt: Date.now() };
   saveCurrentUser();
   state.entitlement = loadEntitlement(state.user.id);
   updateAccountHeader();
   document.querySelector('#loginOverlay')?.remove();
-  showToast(existing ? '欢迎回来，账号权益已同步' : '登录成功，已领取今日 3 次免费下载');
+  if (!silent) showToast(existing ? '欢迎回来，已识别当前账号' : (isRegistration ? '注册成功，已领取今日 3 次免费下载' : '登录成功，已领取今日 3 次免费下载'));
   if (pendingAfterLogin?.startsWith('download:')) {
     const format = pendingAfterLogin.split(':')[1] || 'word';
     pendingAfterLogin = null;
@@ -835,11 +924,12 @@ function completeLogin(identity) {
 }
 
 async function logoutUser() {
-  if (backendMode && authToken) {
+  if (serverApiReady && authToken) {
     try { await apiRequest('/api/auth/logout', { method: 'POST', body: {} }); } catch (_) {}
   }
   localStorage.removeItem('sunny-current-user');
   localStorage.removeItem('sunny-auth-token');
+  try { await window.firebaseAuthClient?.logout(); } catch (_) {}
   authToken = '';
   state.user = null;
   state.entitlement = { plan: 'none', credits: 0 };
@@ -849,13 +939,13 @@ async function logoutUser() {
 }
 
 function loadOrders() {
-  if (backendMode) return cachedServerOrders;
+  if (serverApiReady) return cachedServerOrders;
   try { return JSON.parse(localStorage.getItem('sunny-payment-orders')) || []; }
   catch (_) { return []; }
 }
 
 function saveOrder(order) {
-  if (backendMode) {
+  if (serverApiReady) {
     const index = cachedServerOrders.findIndex(item => item.orderNo === order.orderNo);
     if (index >= 0) cachedServerOrders[index] = order;
     else cachedServerOrders.push(order);
@@ -986,7 +1076,7 @@ function renderPaymentModal() {
       </section>`;
   }
   bindPaymentActions();
-  if (paymentState.stage === 'qr' && backendMode) startOrderPolling();
+  if (paymentState.stage === 'qr' && serverApiReady) startOrderPolling();
 }
 
 function bindPaymentActions() {
@@ -1013,7 +1103,7 @@ function bindPaymentActions() {
       const chosenPlan = plans[paymentState.plan];
       button.disabled = true;
       button.textContent = '正在创建订单…';
-      if (backendMode) {
+      if (serverApiReady) {
         try {
           const result = await apiRequest('/api/payments/orders', { method: 'POST', body: { plan: paymentState.plan, method: paymentState.method } });
           paymentState.orderNo = result.order_no;
@@ -1083,7 +1173,7 @@ function startOrderPolling() {
 }
 
 async function activatePlan() {
-  if (backendMode) {
+  if (serverApiReady) {
     try {
       await apiRequest('/api/payments/demo-confirm', { method: 'POST', body: { order_no: paymentState.orderNo } });
       await syncServerSession();
@@ -1127,7 +1217,7 @@ function refreshDownloadUI() {
 }
 
 async function performDownload(format = 'word') {
-  if (backendMode) {
+  if (serverApiReady) {
     try {
       await apiRequest('/api/quota/consume', { method: 'POST', body: { action: 'download' } });
       await syncServerSession();
@@ -1141,7 +1231,7 @@ async function performDownload(format = 'word') {
   if (format === 'pdf') exportPdf(content);
   else exportWord(content);
 
-  if (!backendMode) consumeLocalDownloadCredit();
+  if (!serverApiReady) consumeLocalDownloadCredit();
   refreshDownloadUI();
   updateAccountHeader();
 }
@@ -1248,4 +1338,21 @@ document.addEventListener('keydown', event => {
 loadDraft();
 renderLanding();
 updateAccountHeader();
-if (backendMode && authToken) syncServerSession();
+async function bootstrapAuthentication() {
+  await loadAppConfig();
+  if (serverApiReady && authToken && await syncServerSession()) return;
+  try {
+    const firebaseUser = await window.firebaseAuthClient?.getCurrentUser();
+    if (firebaseUser) {
+      await completeFirebaseAuthentication(firebaseUser, false, true);
+    } else if (appConfig.firebaseReady && state.user?.provider === 'firebase') {
+      localStorage.removeItem('sunny-current-user');
+      state.user = null;
+      state.entitlement = { plan: 'none', credits: 0 };
+      updateAccountHeader();
+    }
+  } catch (error) {
+    console.warn('恢复 Firebase 登录状态失败', error);
+  }
+}
+bootstrapAuthentication();
