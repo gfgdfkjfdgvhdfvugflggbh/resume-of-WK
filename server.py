@@ -19,7 +19,7 @@ from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 from urllib.request import Request, urlopen
 
 try:
@@ -54,11 +54,15 @@ load_env_file(ROOT / ".env")
 DEMO_MODE = os.getenv("DEMO_MODE", "true").lower() == "true"
 WEBHOOK_SECRET = os.getenv("PAYMENT_WEBHOOK_SECRET", "")
 ADMIN_SECRET = os.getenv("ADMIN_SECRET", "")
+DEFAULT_XIANYU_ITEM_URLS = {
+    "single": "https://m.tb.cn/h.RvJF1Sb?tk=07vFgPDqfsx",
+    "basic": "https://m.tb.cn/h.RvJw8Mt?tk=w9GtgPDrd8x",
+    "pro": "https://m.tb.cn/h.RvJDEOQ?tk=bALjgPDs6dw",
+}
 XIANYU_ITEM_URL = os.getenv("XIANYU_ITEM_URL", "")
 XIANYU_ITEM_URLS = {
-    "single": os.getenv("XIANYU_SINGLE_URL", "") or XIANYU_ITEM_URL,
-    "basic": os.getenv("XIANYU_BASIC_URL", "") or XIANYU_ITEM_URL,
-    "pro": os.getenv("XIANYU_PRO_URL", "") or XIANYU_ITEM_URL,
+    plan: os.getenv(f"XIANYU_{plan.upper()}_URL", "") or XIANYU_ITEM_URL or default_url
+    for plan, default_url in DEFAULT_XIANYU_ITEM_URLS.items()
 }
 DIRECT_PAYMENT_ENABLED = os.getenv("DIRECT_PAYMENT_ENABLED", "false").lower() == "true"
 FIREBASE_WEB_CONFIG = {
@@ -250,6 +254,12 @@ def create_session(conn: sqlite3.Connection, user_id: str) -> str:
     return token
 
 
+def grant_plan_text(plan: str) -> str:
+    if plan == "single":
+        return "Word/PDF 单次下载额度 × 1"
+    return "30 天会员 · 每周 35 次优化" if plan == "basic" else "30 天无限会员"
+
+
 def grant_plan(conn: sqlite3.Connection, user_id: str, plan: str) -> str:
     """幂等事务内发放套餐；单次额度与会员权益可同时保留。"""
     current = conn.execute("SELECT * FROM entitlements WHERE user_id=?", (user_id,)).fetchone()
@@ -264,7 +274,7 @@ def grant_plan(conn: sqlite3.Connection, user_id: str, plan: str) -> str:
             "ON CONFLICT(user_id) DO UPDATE SET plan=?,credits=?,expires_at=?",
             (user_id, stored_plan, credits, expires_at, stored_plan, credits, expires_at),
         )
-        return "Word/PDF 单次下载额度 × 1"
+        return grant_plan_text(plan)
 
     base = expires_at if current_plan == plan and expires_at and expires_at > now() else now()
     new_expiry = base + 30 * 24 * 3600
@@ -273,7 +283,7 @@ def grant_plan(conn: sqlite3.Connection, user_id: str, plan: str) -> str:
         "ON CONFLICT(user_id) DO UPDATE SET plan=?,credits=?,expires_at=?,usage_date=NULL,usage_count=0",
         (user_id, plan, credits, new_expiry, plan, credits, new_expiry),
     )
-    return "30 天会员 · 每周 35 次优化" if plan == "basic" else "30 天无限会员"
+    return grant_plan_text(plan)
 
 
 def fulfill_order(conn: sqlite3.Connection, order_no: str, transaction_id: str) -> dict:
@@ -328,7 +338,8 @@ class Handler(SimpleHTTPRequestHandler):
         ).fetchone()
 
     def do_GET(self):
-        path = urlparse(self.path).path
+        parsed_url = urlparse(self.path)
+        path = parsed_url.path
         if path == "/api/config":
             return self.reply({
                 "demoMode": DEMO_MODE,
@@ -357,8 +368,8 @@ class Handler(SimpleHTTPRequestHandler):
                 entitlement = conn.execute("SELECT * FROM entitlements WHERE user_id=?", (user["id"],)).fetchone()
                 orders = conn.execute("SELECT * FROM orders WHERE user_id=? ORDER BY created_at DESC LIMIT 20", (user["id"],)).fetchall()
                 return self.reply({"user": row_dict(user), "entitlement": row_dict(entitlement), "orders": [row_dict(x) for x in orders]})
-        if path.startswith("/api/payments/orders/"):
-            order_no = path.rsplit("/", 1)[-1]
+        if path.startswith("/api/payments/orders/") or path == "/api/orders":
+            order_no = path.rsplit("/", 1)[-1] if path.startswith("/api/payments/orders/") else parse_qs(parsed_url.query).get("order_no", [""])[0]
             with db() as conn:
                 user = self.auth_user(conn)
                 order = conn.execute("SELECT * FROM orders WHERE order_no=?", (order_no,)).fetchone()
@@ -374,7 +385,7 @@ class Handler(SimpleHTTPRequestHandler):
         except Exception:
             return self.reply({"error": "INVALID_JSON"}, HTTPStatus.BAD_REQUEST)
 
-        if path == "/api/auth/firebase/session":
+        if path in ("/api/auth/firebase/session", "/api/auth-session"):
             if not FIREBASE_AUTH_ENABLED:
                 return self.reply({"error": "FIREBASE_AUTH_NOT_CONFIGURED"}, HTTPStatus.SERVICE_UNAVAILABLE)
             id_token = str(body.get("id_token", "")).strip()
@@ -449,6 +460,54 @@ class Handler(SimpleHTTPRequestHandler):
                 created = conn.execute("SELECT * FROM redemption_codes WHERE code=?", (code,)).fetchone()
                 return self.reply({"redemption": row_dict(created), "idempotent": False})
 
+        if path == "/api/admin-confirm":
+            if not admin_secret_valid(self.headers):
+                return self.reply({"error": "INVALID_ADMIN_SECRET"}, HTTPStatus.UNAUTHORIZED)
+            website_order_no = str(body.get("website_order_no", "")).strip()
+            xianyu_order_no = str(body.get("xianyu_order_no", "")).strip()
+            try:
+                paid_cents = round(float(str(body.get("paid_amount", "")).replace("¥", "").replace("￥", "")) * 100)
+            except ValueError:
+                paid_cents = -1
+            if len(website_order_no) < 10 or len(xianyu_order_no) < 6 or paid_cents < 0:
+                return self.reply({"error": "INVALID_CONFIRMATION_DATA"}, HTTPStatus.BAD_REQUEST)
+            with db() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                order = conn.execute("SELECT * FROM orders WHERE order_no=?", (website_order_no,)).fetchone()
+                if not order:
+                    conn.rollback()
+                    return self.reply({"error": "ORDER_NOT_FOUND"}, HTTPStatus.NOT_FOUND)
+                expected_cents = round(float(PLAN_TABLE[order["plan"]]["amount"]) * 100)
+                if paid_cents != expected_cents:
+                    conn.rollback()
+                    return self.reply({"error": "AMOUNT_MISMATCH"}, HTTPStatus.BAD_REQUEST)
+                if order["status"] == "FULFILLED":
+                    if order["provider_transaction_id"] != f"XIANYU_{xianyu_order_no}":
+                        conn.rollback()
+                        return self.reply({"error": "ORDER_ALREADY_CONFIRMED"}, HTTPStatus.CONFLICT)
+                    user = conn.execute("SELECT * FROM users WHERE id=?", (order["user_id"],)).fetchone()
+                    payload = {**row_dict(order), "email": user["email"] or "", "grant_text": grant_plan_text(order["plan"])}
+                    conn.commit()
+                    return self.reply({"ok": True, "idempotent": True, "order": payload})
+                used = conn.execute("SELECT order_no FROM orders WHERE provider_transaction_id=?", (f"XIANYU_{xianyu_order_no}",)).fetchone()
+                if used and used["order_no"] != website_order_no:
+                    conn.rollback()
+                    return self.reply({"error": "XIANYU_ORDER_ALREADY_USED"}, HTTPStatus.CONFLICT)
+                if order["status"] != "PENDING":
+                    conn.rollback()
+                    return self.reply({"error": "INVALID_ORDER_STATUS"}, HTTPStatus.BAD_REQUEST)
+                grant_text = grant_plan(conn, order["user_id"], order["plan"])
+                paid_at = now()
+                conn.execute(
+                    "UPDATE orders SET status='FULFILLED',provider_transaction_id=?,paid_at=?,fulfilled_at=? WHERE order_no=?",
+                    (f"XIANYU_{xianyu_order_no}", paid_at, paid_at, website_order_no),
+                )
+                user = conn.execute("SELECT * FROM users WHERE id=?", (order["user_id"],)).fetchone()
+                fulfilled = conn.execute("SELECT * FROM orders WHERE order_no=?", (website_order_no,)).fetchone()
+                payload = {**row_dict(fulfilled), "email": user["email"] or "", "xianyu_order_no": xianyu_order_no, "grant_text": grant_text}
+                conn.commit()
+                return self.reply({"ok": True, "idempotent": False, "order": payload})
+
         if path == "/api/redemptions/redeem":
             with db() as conn:
                 user = self.auth_user(conn)
@@ -514,13 +573,14 @@ class Handler(SimpleHTTPRequestHandler):
                 token = create_session(conn, user["id"])
                 return self.reply({"token": token, "user": row_dict(user), "demo": True})
 
-        if path == "/api/payments/orders":
+        if path in ("/api/payments/orders", "/api/orders"):
             with db() as conn:
                 user = self.auth_user(conn)
                 if not user:
                     return self.reply({"error": "UNAUTHORIZED"}, HTTPStatus.UNAUTHORIZED)
-                plan, method = body.get("plan"), body.get("method")
-                if plan not in PLAN_TABLE or method not in ("wechat", "alipay"):
+                plan = body.get("plan")
+                method = "xianyu" if path == "/api/orders" else body.get("method")
+                if plan not in PLAN_TABLE or method not in ("wechat", "alipay", "xianyu"):
                     return self.reply({"error": "INVALID_PLAN_OR_METHOD"}, HTTPStatus.BAD_REQUEST)
                 order_no = f"XQ{int(time.time())}{secrets.randbelow(100000):05d}"
                 amount = PLAN_TABLE[plan]["amount"]  # 金额必须由服务端决定，不能相信前端。
@@ -528,13 +588,16 @@ class Handler(SimpleHTTPRequestHandler):
                     "INSERT INTO orders(order_no,user_id,plan,method,amount,status,created_at) VALUES(?,?,?,?,?,'PENDING',?)",
                     (order_no, user["id"], plan, method, amount, now()),
                 )
+                if method == "xianyu":
+                    order = conn.execute("SELECT * FROM orders WHERE order_no=?", (order_no,)).fetchone()
+                    return self.reply({"order": row_dict(order)}, HTTPStatus.CREATED)
                 # 生产环境：调用微信 Native 下单或支付宝当面付，返回真实 code_url/qr_code。
                 if not DEMO_MODE:
                     conn.execute("UPDATE orders SET status='CLOSED' WHERE order_no=?", (order_no,))
                     return self.reply({"error": "PAYMENT_PROVIDER_NOT_CONFIGURED"}, HTTPStatus.SERVICE_UNAVAILABLE)
                 return self.reply({"order_no": order_no, "amount": amount, "status": "PENDING", "qr_code": None, "qr_image_url": None, "demo": DEMO_MODE})
 
-        if path == "/api/quota/consume":
+        if path in ("/api/quota/consume", "/api/quota-consume"):
             with db() as conn:
                 user = self.auth_user(conn)
                 if not user:
@@ -548,9 +611,21 @@ class Handler(SimpleHTTPRequestHandler):
                     and entitlement["expires_at"]
                     and entitlement["expires_at"] > now()
                 )
-                if active_member:
+                if active_member and entitlement["plan"] == "pro":
                     conn.commit()
-                    return self.reply({"allowed": True, "source": entitlement["plan"]})
+                    return self.reply({"allowed": True, "source": "pro", "remaining": None})
+                if active_member and entitlement["plan"] == "basic":
+                    week = china_week_key()
+                    used = entitlement["usage_count"] if entitlement["usage_date"] == week else 0
+                    if used >= 35:
+                        conn.rollback()
+                        return self.reply({"allowed": False, "reason": "WEEKLY_LIMIT_REACHED"}, HTTPStatus.PAYMENT_REQUIRED)
+                    conn.execute(
+                        "UPDATE entitlements SET usage_date=?,usage_count=? WHERE user_id=?",
+                        (week, used + 1, user["id"]),
+                    )
+                    conn.commit()
+                    return self.reply({"allowed": True, "source": "basic", "remaining": 34 - used})
                 if fresh_user["free_credits"] > 0:
                     remaining = fresh_user["free_credits"] - 1
                     conn.execute("UPDATE users SET free_credits=? WHERE id=?", (remaining, user["id"]))

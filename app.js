@@ -69,10 +69,19 @@ function normalizeServerOrder(order) {
     planName: plans[order.plan]?.name || order.plan,
     amount: Number(order.amount),
     method: order.method,
-    methodName: order.method === 'wechat' ? '微信支付' : '支付宝',
+    methodName: order.method === 'xianyu' ? '闲鱼付款' : order.method === 'wechat' ? '微信支付' : '支付宝',
     status: order.status,
-    grantText: order.plan === 'single' ? '单次简历下载额度 × 1' : order.plan === 'basic' ? '30 天会员 · 每周 35 次优化额度' : '30 天无限会员 · 不限次数'
+    grantText: order.grant_text || (order.plan === 'single' ? '单次简历下载额度 × 1' : order.plan === 'basic' ? '30 天会员 · 每周 35 次优化额度' : '30 天无限会员 · 不限次数')
   };
+}
+
+function orderStatusLabel(status) {
+  if (status === 'FULFILLED') return '已到账 / 已发放';
+  if (status === 'PENDING') return '等待闲鱼核款';
+  if (status === 'PAID') return '已到账 / 发放中';
+  if (status === 'CLOSED') return '已关闭';
+  if (status === 'REFUNDED') return '已退款';
+  return status || '处理中';
 }
 
 async function syncServerSession() {
@@ -732,7 +741,7 @@ function renderLoginModal() {
       </section>`;
   }
   if (loginState.stage === 'account' && state.user) {
-    const orders = loadOrders().filter(order => order.userId === state.user.id).slice(-3).reverse();
+    const orders = loadOrders().filter(order => order.userId === state.user.id).slice(0, 3);
     const entitlement = state.entitlement || { plan: 'none' };
     const memberName = entitlement.plan === 'basic' ? '向晴会员' : entitlement.plan === 'pro' ? '无限会员' : '暂未开通会员';
     overlay.innerHTML = `
@@ -742,9 +751,9 @@ function renderLoginModal() {
         <h2 id="accountTitle">${escapeHTML(state.user.displayName || state.user.email || maskPhone(state.user.phone))}</h2>
         <p class="account-id">用户 ID：${escapeHTML(state.user.id)}</p>
         <div class="account-benefits"><div><span>今日剩余免费额度</span><strong>${state.user.freeCredits || 0}<i> 次</i></strong></div><div><span>当前会员</span><strong>${memberName}</strong></div></div>
-        <div class="redeem-card"><div><b>闲鱼兑换码</b><small>已在闲鱼付款？把卖家发给你的兑换码填在这里。</small></div><div><input id="redeemCode" maxlength="20" placeholder="例如 XQ-ABCD-EFGH-JKLM"><button data-login-action="redeem">确认兑换</button></div><p id="redeemError"></p></div>
+        ${serverApiReady ? '<div class="redeem-card order-bind-card"><div><b>闲鱼订单自动绑定账号</b><small>网站创建订单后，请把网站订单号发给闲鱼卖家。卖家确认到账，权益会自动进入当前邮箱账号，无需兑换码。</small></div></div>' : '<div class="redeem-card"><div><b>闲鱼兑换码</b><small>已在闲鱼付款？把卖家发给你的兑换码填在这里。</small></div><div><input id="redeemCode" maxlength="20" placeholder="例如 XQ-ABCD-EFGH-JKLM"><button data-login-action="redeem">确认兑换</button></div><p id="redeemError"></p></div>'}
         <h3>最近订单</h3>
-        <div class="order-list">${orders.length ? orders.map(order => `<div><span><b>${escapeHTML(order.orderNo)}</b><small>${order.planName} · ${order.methodName}</small></span><em>${order.status === 'FULFILLED' ? '已到账 / 已发放' : order.status}</em></div>`).join('') : '<p>还没有付费订单。每天前 3 次下载免费，不着急。</p>'}</div>
+        <div class="order-list">${orders.length ? orders.map(order => `<div><span><b>${escapeHTML(order.orderNo)}</b><small>${order.planName} · ${order.methodName}</small></span><em>${orderStatusLabel(order.status)}</em></div>`).join('') : '<p>还没有付费订单。每天前 3 次下载免费，不着急。</p>'}</div>
         <button class="account-logout" data-login-action="logout">退出当前账号</button>
       </section>`;
   }
@@ -866,7 +875,7 @@ function bindLoginActions() {
 async function completeFirebaseAuthentication(firebaseUser, isRegistration = false, silent = false) {
   if (serverApiReady && appConfig.serverAuthEnabled) {
     try {
-      const result = await apiRequest('/api/auth/firebase/session', {
+      const result = await apiRequest('/api/auth-session', {
         method: 'POST',
         body: { id_token: firebaseUser.idToken }
       });
@@ -993,8 +1002,8 @@ async function requestDownload(format = 'word') {
   await performDownload(format);
 }
 
-function openPaywall(format = 'word') {
-  paymentState = { plan: 'single', method: 'wechat', stage: 'choose', orderNo: '', qrCode: '', demo: !backendMode, downloadFormat: format };
+function openPaywall(format = 'word', preferredPlan = 'single') {
+  paymentState = { plan: plans[preferredPlan] ? preferredPlan : 'single', method: 'xianyu', stage: 'choose', orderNo: '', qrCode: '', demo: false, downloadFormat: format };
   const overlay = document.createElement('div');
   overlay.className = 'payment-overlay';
   overlay.id = 'paymentOverlay';
@@ -1038,9 +1047,27 @@ function renderPaymentModal() {
           <button class="pay-confirm" data-pay-action="create">确认支付 ¥${plan.price}</button>
           <p class="payment-safe">支付信息由微信 / 支付宝安全处理　·　会员到期不自动续费</p>
         ` : `
-          <div class="xianyu-entry xianyu-checkout"><div><b>通过闲鱼安全购买</b><small>付款后，卖家会在闲鱼聊天中发送一次性兑换码</small></div>${xianyuUrl ? `<a href="${escapeHTML(xianyuUrl)}" target="_blank" rel="noopener">去闲鱼购买 ¥${plan.price}</a>` : '<span>商品链接配置后即可购买</span>'}<button data-pay-action="redeem">已购买，输入兑换码</button></div>
-          <p class="payment-safe">付款和订单留在闲鱼内完成　·　兑换权益绑定当前登录账号</p>
+          <div class="xianyu-order-intro"><b>先生成网站订单，再去闲鱼付款</b><p>系统会把订单绑定到当前邮箱账号。付款时请把网站订单号发给闲鱼卖家，卖家核对闲鱼订单和金额后，权益自动到账。</p></div>
+          <div class="payment-total"><span>本次套餐 <small>${plan.name} · 会员到期不自动续费</small></span><strong>¥${plan.price}</strong></div>
+          <button class="pay-confirm" data-pay-action="create-xianyu" ${serverApiReady ? '' : 'disabled'}>${serverApiReady ? `生成订单并去闲鱼付款 ¥${plan.price}` : '订单服务配置中'}</button>
+          <p class="payment-safe">钱款仍在闲鱼内支付　·　网站不会仅凭“我已付款”发放权益</p>
         `}
+      </section>`;
+  }
+  if (paymentState.stage === 'xianyu') {
+    overlay.innerHTML = `
+      <section class="payment-sheet xianyu-order-sheet" role="dialog" aria-modal="true" aria-label="闲鱼付款订单">
+        <button class="payment-close" data-pay-action="close" aria-label="关闭支付">×</button>
+        <button class="pay-back" data-pay-action="back">← 返回选择套餐</button>
+        <span class="eyebrow">订单已绑定当前账号</span>
+        <h2>去闲鱼付款，并把订单号发给卖家</h2>
+        <p class="login-lead">卖家会同时核对网站订单、闲鱼订单和实付金额。确认一致后，系统自动释放额度。</p>
+        <div class="website-order-number"><span>网站订单号</span><strong>${escapeHTML(paymentState.orderNo)}</strong><button data-pay-action="copy-order">复制订单号</button></div>
+        <ol class="xianyu-pay-steps"><li>复制上方网站订单号。</li><li>前往闲鱼购买“${escapeHTML(plan.name)}”，实付 ¥${plan.price}。</li><li>在闲鱼聊天中把网站订单号发给卖家。</li><li>卖家确认到账后，本页会自动显示成功。</li></ol>
+        ${xianyuUrl ? `<a class="pay-confirm xianyu-go-button" href="${escapeHTML(xianyuUrl)}" target="_blank" rel="noopener">打开闲鱼商品并付款</a>` : '<button class="pay-confirm" disabled>闲鱼商品链接待配置</button>'}
+        <button class="xianyu-refresh" data-pay-action="refresh-order">我已付款，刷新订单状态</button>
+        <div class="payment-waiting"><i></i> 等待卖家核对到账与发放权益…</div>
+        <p class="order-number">订单只绑定账号：${escapeHTML(state.user?.email || state.user?.id || '')}</p>
       </section>`;
   }
   if (paymentState.stage === 'qr') {
@@ -1076,7 +1103,7 @@ function renderPaymentModal() {
       </section>`;
   }
   bindPaymentActions();
-  if (paymentState.stage === 'qr' && serverApiReady) startOrderPolling();
+  if (['qr', 'xianyu'].includes(paymentState.stage) && serverApiReady) startOrderPolling();
 }
 
 function bindPaymentActions() {
@@ -1099,6 +1126,27 @@ function bindPaymentActions() {
       overlay.remove();
       openLoginModal();
     }
+    if (action === 'create-xianyu') {
+      button.disabled = true;
+      button.textContent = '正在生成专属订单…';
+      try {
+        const result = await apiRequest('/api/orders', { method: 'POST', body: { plan: paymentState.plan } });
+        const order = normalizeServerOrder(result.order);
+        paymentState.orderNo = order.orderNo;
+        paymentState.stage = 'xianyu';
+        saveOrder(order);
+        renderPaymentModal();
+      } catch (error) {
+        button.disabled = false;
+        button.textContent = `生成订单并去闲鱼付款 ¥${plans[paymentState.plan].price}`;
+        showToast(error.status === 401 ? '登录状态已过期，请重新登录' : '订单生成失败，请稍后重试');
+      }
+    }
+    if (action === 'copy-order') {
+      await navigator.clipboard.writeText(paymentState.orderNo);
+      button.textContent = '已复制，请发给闲鱼卖家';
+    }
+    if (action === 'refresh-order') await refreshXianyuOrder(true);
     if (action === 'create') {
       const chosenPlan = plans[paymentState.plan];
       button.disabled = true;
@@ -1153,7 +1201,7 @@ function startOrderPolling() {
   paymentPollTimer = setInterval(async () => {
     checks += 1;
     try {
-      const data = await apiRequest(`/api/payments/orders/${encodeURIComponent(paymentState.orderNo)}`);
+      const data = await apiRequest(`/api/orders?order_no=${encodeURIComponent(paymentState.orderNo)}`);
       const order = normalizeServerOrder(data.order);
       saveOrder(order);
       if (order.status === 'FULFILLED') {
@@ -1162,14 +1210,33 @@ function startOrderPolling() {
         paymentState.stage = 'success';
         renderPaymentModal();
       }
-      if (['CLOSED', 'REFUNDED'].includes(order.status) || checks >= 60) {
+      if (['CLOSED', 'REFUNDED'].includes(order.status) || checks >= 180) {
         stopOrderPolling();
-        if (checks >= 60) showToast('订单仍在确认中，可稍后在账号中心查看');
+        if (checks >= 180) showToast('订单仍在确认中，可稍后在账号中心查看');
       }
     } catch (_) {
-      if (checks >= 60) stopOrderPolling();
+      if (checks >= 180) stopOrderPolling();
     }
   }, 2000);
+}
+
+async function refreshXianyuOrder(showPendingToast = false) {
+  if (!paymentState.orderNo) return;
+  try {
+    const data = await apiRequest(`/api/orders?order_no=${encodeURIComponent(paymentState.orderNo)}`);
+    const order = normalizeServerOrder(data.order);
+    saveOrder(order);
+    if (order.status === 'FULFILLED') {
+      stopOrderPolling();
+      await syncServerSession();
+      paymentState.stage = 'success';
+      renderPaymentModal();
+      return;
+    }
+    if (showPendingToast) showToast('卖家还在核对，请确认已把网站订单号发到闲鱼聊天');
+  } catch (_) {
+    if (showPendingToast) showToast('订单状态查询失败，请稍后重试');
+  }
 }
 
 async function activatePlan() {
@@ -1219,10 +1286,13 @@ function refreshDownloadUI() {
 async function performDownload(format = 'word') {
   if (serverApiReady) {
     try {
-      await apiRequest('/api/quota/consume', { method: 'POST', body: { action: 'download' } });
+      await apiRequest('/api/quota-consume', { method: 'POST', body: { action: 'download' } });
       await syncServerSession();
     } catch (error) {
-      if (error.status === 402) openPaywall(format);
+      if (error.status === 402 && error.data?.reason === 'WEEKLY_LIMIT_REACHED') {
+        showToast('本周 35 次额度已经用完，下周一会自动恢复；也可以升级无限会员');
+        openPaywall(format, 'pro');
+      } else if (error.status === 402) openPaywall(format);
       else showToast('下载权益校验失败，请稍后重试');
       return;
     }

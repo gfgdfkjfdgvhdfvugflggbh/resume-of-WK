@@ -1,35 +1,44 @@
 const secretInput = document.querySelector('#adminSecret');
+const websiteOrderInput = document.querySelector('#websiteOrder');
 const orderInput = document.querySelector('#xianyuOrder');
-const planInput = document.querySelector('#orderPlan');
+const amountInput = document.querySelector('#paidAmount');
 const resultBox = document.querySelector('#adminResult');
-const generateButton = document.querySelector('#generateCode');
+const confirmButton = document.querySelector('#confirmOrder');
 
-generateButton.addEventListener('click', async () => {
+confirmButton.addEventListener('click', async () => {
   const secret = secretInput.value.trim();
-  const orderNo = orderInput.value.trim();
-  if (!secret || orderNo.length < 6) return showResult('请填写后台密钥和正确的闲鱼订单号', true);
-  generateButton.disabled = true;
-  generateButton.textContent = '正在生成…';
+  const websiteOrderNo = websiteOrderInput.value.trim();
+  const xianyuOrderNo = orderInput.value.trim();
+  const paidAmount = amountInput.value.trim();
+  if (!secret || websiteOrderNo.length < 10 || xianyuOrderNo.length < 6 || !/^\d+(\.\d{1,2})?$/.test(paidAmount)) {
+    return showResult('请完整填写后台密钥、两个订单号和实付金额', true);
+  }
+  confirmButton.disabled = true;
+  confirmButton.textContent = '正在核对并发放…';
   try {
-    const response = await fetch('/api/admin/redemption-codes', {
+    const response = await fetch('/api/admin-confirm', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Admin-Secret': secret },
-      body: JSON.stringify({ xianyu_order_no: orderNo, plan: planInput.value })
+      body: JSON.stringify({ website_order_no: websiteOrderNo, xianyu_order_no: xianyuOrderNo, paid_amount: paidAmount })
     });
     const data = await response.json();
-    if (!response.ok) throw new Error(data.error || '生成失败');
-    const item = data.redemption;
-    resultBox.innerHTML = `<span>${data.idempotent ? '该订单已生成过兑换码' : '兑换码生成成功'}</span><strong>${item.code}</strong><small>订单：${escapeText(item.xianyu_order_no)} · 状态：${item.status}</small><button id="copyCode">复制兑换码</button>`;
+    if (!response.ok) throw new Error(data.error || 'CONFIRMATION_FAILED');
+    const order = data.order;
+    resultBox.innerHTML = `<span>${data.idempotent ? '该订单之前已完成发放，没有重复增加权益' : '核款成功，权益已经发放'}</span><strong>${escapeText(order.order_no)}</strong><small>账号：${escapeText(order.email || order.user_id)} · 套餐：${escapeText(order.plan)} · ¥${escapeText(order.amount)} · 状态：已到账 / 已发放</small>`;
     resultBox.className = 'admin-result show';
-    document.querySelector('#copyCode').addEventListener('click', async () => {
-      await navigator.clipboard.writeText(item.code);
-      document.querySelector('#copyCode').textContent = '已复制，可以发给买家';
-    });
   } catch (error) {
-    showResult(error.message === 'INVALID_ADMIN_SECRET' ? '后台密钥不正确' : '生成失败，请检查订单号后重试', true);
+    const messages = {
+      INVALID_ADMIN_SECRET: '后台密钥不正确',
+      ORDER_NOT_FOUND: '没有找到网站订单，请核对订单号',
+      AMOUNT_MISMATCH: '实付金额与网站套餐金额不一致，禁止发放',
+      XIANYU_ORDER_ALREADY_USED: '这个闲鱼订单号已经用于其他网站订单',
+      ORDER_ALREADY_CONFIRMED: '这个网站订单已经绑定另一个闲鱼订单，不能重复或换单发放',
+      INVALID_ORDER_STATUS: '网站订单状态不允许发放'
+    };
+    showResult(messages[error.message] || '核款失败，请检查订单信息后重试', true);
   } finally {
-    generateButton.disabled = false;
-    generateButton.textContent = '确认已收款，生成兑换码';
+    confirmButton.disabled = false;
+    confirmButton.textContent = '确认闲鱼已收款，释放账号权益';
   }
 });
 

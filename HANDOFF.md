@@ -1,7 +1,7 @@
 # 向晴简历｜产品与技术 Handoff
 
 > 文档用途：承接从产品构想到正式上线的全部需求、业务规则、交互逻辑和技术边界。  
-> 当前版本：v1.1（线上部署与 Firebase 邮箱认证基线）
+> 当前版本：v1.2（Firebase 账号、闲鱼订单与权益发放闭环）
 > 更新日期：2026-07-02
 
 ## 0. 完成度审查与交付结论
@@ -13,8 +13,8 @@
 ### 0.2 本次补全后
 
 - **产品说明书完成度：100%**。本文已成为产品、设计、前端、后端、AI、测试、运营共同使用的唯一需求基线；
-- **当前产品实现度：约 74%**。主要交互、文件解析、两页预览、Firebase 邮箱注册登录、域名与线上静态部署均已存在；
-- **真实交易闭环准备度：约 55%**。仍缺生产数据库/服务端额度、线上兑换码后台、真实 AI、正式 DOCX、合规文件与监控；
+- **当前产品实现度：约 82%**。主要交互、文件解析、两页预览、Firebase 邮箱注册登录、域名、线上部署及闲鱼核款闭环均已有代码；
+- **真实交易闭环准备度：约 88%**。订单、核款、幂等校验与权益发放已实现；还需在 Firebase 开启 Firestore、在 Vercel 配置服务账号/后台密钥/三个闲鱼商品链接并重新部署；
 - 文档中的“已完成”仅指当前仓库能运行的能力；“上线门槛”必须全部通过后才能对真实用户收款。
 
 ### 0.3 冻结的产品决策
@@ -217,11 +217,11 @@
 
 当前前端包含“模拟支付成功”按钮，仅用于演示，不产生扣款。`server.py` 的 DEMO 模式也只用于本地联调。
 
-### 8.4 闲鱼首发收款与兑换码
+### 8.4 闲鱼首发收款与账号直充
 
-普通个人卖家首发阶段采用：买家在闲鱼付款 → 卖家核对闲鱼订单号与套餐 → 卖家后台生成一次性兑换码 → 通过闲鱼聊天发给买家 → 买家登录网站兑换。每个闲鱼订单号只能生成一个兑换码，每个兑换码只能绑定一个网站用户。不得通过爬虫或非授权接口读取闲鱼订单；没有官方商家接口时由卖家人工确认到账。
+普通个人卖家首发阶段采用：网站为已登录 Firebase 用户创建唯一订单 → 买家在闲鱼付款并通过闲鱼聊天发送网站订单号 → 卖家核对网站订单号、闲鱼订单号和实付金额 → 卖家后台确认 → Firestore 事务标记到账并向该 Firebase UID 发放额度/会员 → 买家页面轮询并显示“已到账 / 已发放”。同一闲鱼订单号只能绑定一个网站订单，重复确认不得重复增加权益。
 
-首发页面默认关闭模拟微信/支付宝支付入口，只展示三个套餐对应的闲鱼商品链接和“已购买，输入兑换码”。通过 `.env` 配置 `XIANYU_SINGLE_URL`、`XIANYU_BASIC_URL`、`XIANYU_PRO_URL`；普通个人卖家保持 `DIRECT_PAYMENT_ENABLED=false`。
+没有官方卖家回调时由卖家人工确认到账；不得通过爬虫、Cookie 或非授权接口读取闲鱼订单。人工只负责判断闲鱼是否真的到账，金额校验、订单幂等和权益发放由服务端完成。前端默认关闭模拟微信/支付宝入口。通过 Vercel 环境变量配置 `XIANYU_SINGLE_URL`、`XIANYU_BASIC_URL`、`XIANYU_PRO_URL`、`ADMIN_SECRET` 和 Firebase Admin 服务账号。
 
 ## 9. 正式接入需要产品方提供的资料
 
@@ -285,18 +285,13 @@
 
 | 方法 | 路径 | 用途 |
 |---|---|---|
-| POST | `/api/auth/sms/send` | 发送验证码；DEMO 模式返回测试验证码 |
-| POST | `/api/auth/sms/verify` | 验证手机并创建/恢复唯一账号 |
-| POST | `/api/auth/logout` | 注销当前登录会话 |
-| POST | `/api/auth/oauth/demo` | 本地模拟微信/Apple 唯一身份；生产替换为官方 OAuth 回调 |
+| GET | `/api/config` | 返回线上认证能力、支付模式与闲鱼商品链接（不返回密钥） |
+| POST | `/api/auth-session` | 验证 Firebase ID Token，并以 Firebase UID 创建/恢复唯一用户 |
 | GET | `/api/me` | 获取用户、免费额度、会员和订单 |
-| POST | `/api/payments/orders` | 按服务端价格创建支付订单 |
-| GET | `/api/payments/orders/{order_no}` | 查询当前用户的订单状态 |
-| POST | `/api/payments/demo-confirm` | 仅本地 DEMO，模拟到账和权益发放 |
-| POST | `/api/payments/webhook/{provider}` | 联调回调；正式环境替换为官方验签 |
-| POST | `/api/quota/consume` | 导出前在事务中校验会员或扣减免费/单次下载额度 |
-| POST | `/api/admin/redemption-codes` | 卖家确认闲鱼到账后按订单号生成一次性兑换码 |
-| POST | `/api/redemptions/redeem` | 登录用户兑换闲鱼订单对应额度或会员 |
+| POST | `/api/orders` | 按服务端固定价格创建绑定当前 Firebase UID 的闲鱼待付款订单 |
+| GET | `/api/orders?order_no=...` | 仅允许订单所属账号查询订单状态 |
+| POST | `/api/admin-confirm` | 卖家核对闲鱼到账后，校验金额与订单唯一性并在事务中发放权益 |
+| POST | `/api/quota-consume` | 导出前原子校验并扣减每日免费、单次或会员周额度 |
 
 正式下载建议增加：服务端先调用 `/api/quota/consume`，成功后返回短时有效、只可使用一次的下载令牌，再由下载接口生成 Word。不能让未授权用户直接调用生成接口。
 
@@ -304,10 +299,9 @@
 
 ### users
 
-- `id`：唯一用户 ID；
-- `phone`；
-- `provider`：phone/wechat/apple；
-- `provider_subject`：第三方唯一标识；
+- `uid`：Firebase Authentication 的不可变唯一用户 ID；
+- `email`：用户登录邮箱；
+- `provider`：当前首发为 `firebase`；
 - `free_credits`：初始值 3；
 - `created_at`。
 
@@ -321,6 +315,8 @@
 - `status`；
 - `provider_transaction_id`；
 - `created_at / paid_at / fulfilled_at`。
+
+线上 Firestore 订单另存 `xianyuOrderNo`，并用 `xianyuOrders` 唯一占用记录防止同一闲鱼订单给不同账号重复入账。
 
 ### entitlements
 
@@ -891,3 +887,4 @@ python3 server.py
 | v0.9 | 2026-07-02 | 汇总已有产品需求、前端原型与本地后端骨架 |
 | v1.0 | 2026-07-02 | 补齐 AI 契约、异常、额度细则、售后、后台、指标、非功能、隐私、测试、发布和责任分工 |
 | v1.1 | 2026-07-02 | 记录 GitHub/Vercel/自定义域名/Cloudflare 上线进展，接入 Firebase 邮箱注册登录，并明确生产数据仍需服务端持久化 |
+| v1.2 | 2026-07-02 | 增加 Vercel Functions + Firestore 持久化、闲鱼网站订单、后台人工核款、幂等防重与账号权益直充闭环 |

@@ -7,7 +7,7 @@
       ]
     },
     {
-      "source": "/(app|firebase-auth|firebase-config).js",
+      "source": "/(app|admin|firebase-auth|firebase-config).js",
       "headers": [
         { "key": "Cache-Control", "value": "no-cache, must-revalidate" }
       ]

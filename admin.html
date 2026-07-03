@@ -4,22 +4,23 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>向晴简历｜闲鱼订单发货台</title>
-    <link rel="stylesheet" href="./styles.css">
+    <link rel="stylesheet" href="./styles.css?v=20260702-xianyu-order-1">
   </head>
   <body class="admin-body">
     <main class="admin-shell">
-      <header class="admin-head"><span class="brand-mark">晴</span><div><b>闲鱼订单发货台</b><p>确认闲鱼已收款后，再为订单生成一次性兑换码</p></div></header>
+      <header class="admin-head"><span class="brand-mark">晴</span><div><b>闲鱼订单核款台</b><p>核对网站订单、闲鱼订单和实付金额后，自动向买家账号发放权益</p></div></header>
       <section class="admin-card">
-        <div class="admin-warning">本页面仅供卖家使用。兑换码一旦被买家兑换，权益会绑定到该买家的唯一账号。</div>
+        <div class="admin-warning">本页面仅供卖家使用。必须先在闲鱼卖家端确认订单确实已付款，再点击确认；系统会直接向网站订单绑定的 Firebase 账号发放权益。</div>
         <label><span>后台密钥</span><input id="adminSecret" type="password" placeholder="请输入 ADMIN_SECRET"></label>
-        <label><span>闲鱼订单号</span><input id="xianyuOrder" placeholder="复制闲鱼已付款订单号"></label>
-        <label><span>购买套餐</span><select id="orderPlan"><option value="single">¥2.98 · 单次下载</option><option value="basic">¥19.8 · 30天会员 / 每周35次</option><option value="pro">¥29.8 · 30天无限会员</option></select></label>
-        <button id="generateCode" class="admin-primary">确认已收款，生成兑换码</button>
-        <p class="admin-demo">本机演示默认后台密钥：<code>demo-admin-123456</code>。正式上线必须在 `.env` 设置强随机密钥。</p>
+        <label><span>网站订单号</span><input id="websiteOrder" placeholder="例如 XQ2026070215300012345"></label>
+        <label><span>闲鱼订单号</span><input id="xianyuOrder" placeholder="复制闲鱼卖家端已付款订单号"></label>
+        <label><span>闲鱼实付金额</span><input id="paidAmount" inputmode="decimal" placeholder="例如 2.98、19.8 或 29.8"></label>
+        <button id="confirmOrder" class="admin-primary">确认闲鱼已收款，释放账号权益</button>
+        <p class="admin-demo">套餐和应付金额以网站订单为准，后台会再次校验；同一闲鱼订单号不能给两个账号重复发放。</p>
         <div id="adminResult" class="admin-result" aria-live="polite"></div>
       </section>
-      <section class="admin-steps"><b>发货流程</b><ol><li>买家在闲鱼完成付款。</li><li>核对订单号、金额和套餐。</li><li>在这里生成兑换码。</li><li>通过闲鱼聊天把兑换码发给买家。</li><li>买家登录网站，在账号中心兑换。</li></ol></section>
+      <section class="admin-steps"><b>核款流程</b><ol><li>买家从网站生成订单，并在闲鱼聊天中发来网站订单号。</li><li>在闲鱼卖家端确认该买家订单已付款。</li><li>复制网站订单号、闲鱼订单号，并填写实付金额。</li><li>点击确认，系统事务性标记到账并发放权益。</li><li>买家页面自动显示“已到账 / 已发放”。</li></ol></section>
     </main>
-    <script src="./admin.js"></script>
+    <script src="./admin.js?v=20260702-xianyu-order-1"></script>
   </body>
 </html>
