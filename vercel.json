@@ -1,6 +1,7 @@
 {
   "rewrites": [
     { "source": "/api/config", "destination": "/api/config.js" },
+    { "source": "/api/auth-email", "destination": "/api/auth-email.js" },
     { "source": "/api/auth-session", "destination": "/api/auth-session.js" },
     { "source": "/api/me", "destination": "/api/me.js" },
     { "source": "/api/orders", "destination": "/api/orders.js" },

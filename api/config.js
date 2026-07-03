@@ -12,7 +12,7 @@ export default async function handler(request, response) {
   if (!firebaseAdminConfigured()) return json(response, 503, { error: 'FIREBASE_ADMIN_NOT_CONFIGURED' });
   return json(response, 200, {
     demoMode: false,
-    auth: { firebase: true, email: true, sms: false, wechat: false, apple: false },
+    auth: { firebase: true, email: true, proxy: true, sms: false, wechat: false, apple: false },
     firebase: null,
     orderMode: 'xianyu_manual_confirmation',
     xianyuItemUrl: process.env.XIANYU_ITEM_URL || DEFAULT_XIANYU_URLS.single,

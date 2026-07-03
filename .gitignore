@@ -1,5 +1,7 @@
 .env
 .venv/
+node_modules/
+.secrets/
 firebase-service-account*.json
 serviceAccountKey.json
 resume_app.db

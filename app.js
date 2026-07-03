@@ -138,7 +138,9 @@ async function loadAppConfig() {
   };
   if (appConfig.auth.firebase && window.firebaseAuthClient) {
     try {
-      appConfig.firebaseReady = await window.firebaseAuthClient.initialize(firebaseConfig);
+      appConfig.firebaseReady = await window.firebaseAuthClient.initialize(firebaseConfig, {
+        proxy: Boolean(serverConfig.auth?.proxy)
+      });
     } catch (error) {
       console.error('Firebase Authentication 初始化失败', error);
       appConfig.firebaseReady = false;
@@ -228,7 +230,7 @@ function firebaseAuthErrorMessage(error) {
   if (code.includes('operation-not-allowed')) return 'Firebase 控制台尚未启用“邮箱/密码”登录';
   if (code.includes('unauthorized-domain')) return '当前域名未加入 Firebase Authentication 授权网域';
   if (code.includes('too-many-requests')) return '请求过于频繁，请稍后再试';
-  if (code.includes('network-request-failed')) return '网络连接失败，请稍后重试';
+  if (code.includes('network-request-failed') || code.includes('upstream-timeout')) return '登录服务暂时繁忙，请稍后再试';
   return '认证失败，请稍后重试';
 }
 

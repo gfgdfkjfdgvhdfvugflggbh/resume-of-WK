@@ -25,6 +25,8 @@ cp .env.example .env
 
 Firebase Web 配置（包括 API Key）会发送给浏览器，这是 Firebase 的正常设计；真正的服务账号私钥只保存在服务器上，绝不能提交到 Git。
 
+正式站的邮箱注册、登录、密码重置和令牌刷新通过同域 `/api/auth-email` 转发到 Firebase Auth REST API。这样中国大陆用户的浏览器不需要直接加载 Google Firebase SDK 或连接 Google 认证域名；账号仍由 Firebase UID 唯一标识。
+
 正式域名 `hh.nihaojianli.top` 需要加入 Firebase Authentication 的授权网域。注册成功的邮箱用户可在 Firebase 控制台的 Authentication → Users 中查看。
 
 > 仓库已经包含 Firestore + Vercel Functions 的生产数据层；上线前仍需按下方配置文档启用 Firestore，并在 Vercel 填写服务账号、后台密钥和闲鱼商品链接。浏览器本地数据不作为正式付费权益依据。
