@@ -707,18 +707,47 @@ async function copyResume() {
 }
 
 async function openLoginModal() {
-  await loadAppConfig();
-  if (serverApiReady && authToken) await syncServerSession();
-  loginState = { stage: state.user ? 'account' : 'credentials', mode: 'signin', email: state.user?.email || '', error: '' };
+  // Show one visible modal before any network work starts. Rapid taps must not
+  // create a second, empty blur overlay above the real login card.
+  const existingOverlay = document.querySelector('#loginOverlay');
+  if (existingOverlay) return;
   const overlay = document.createElement('div');
   overlay.className = 'login-overlay';
   overlay.id = 'loginOverlay';
+  overlay.innerHTML = `
+    <section class="login-sheet login-opening-sheet" role="dialog" aria-modal="true" aria-busy="true" aria-labelledby="loginOpeningTitle">
+      <button class="payment-close" data-login-action="close" aria-label="关闭登录">×</button>
+      <div class="login-brand"><span class="brand-mark">晴</span><b>向晴简历</b></div>
+      <div class="login-opening-spinner" aria-hidden="true"><i></i></div>
+      <h2 id="loginOpeningTitle">正在打开账号中心</h2>
+      <p class="login-lead">马上就好，你也可以随时关闭这个页面。</p>
+    </section>`;
   document.body.appendChild(overlay);
-  renderLoginModal();
+  bindLoginOverlayDismiss(overlay);
+
+  try {
+    await loadAppConfig();
+    if (serverApiReady && authToken) await syncServerSession();
+  } catch (error) {
+    console.warn('打开账号中心时同步失败', error);
+  }
+  if (!overlay.isConnected) return;
+
+  loginState = { stage: state.user ? 'account' : 'credentials', mode: 'signin', email: state.user?.email || '', error: '' };
+  renderLoginModal(overlay);
 }
 
-function renderLoginModal() {
-  const overlay = document.querySelector('#loginOverlay');
+function bindLoginOverlayDismiss(overlay) {
+  overlay.addEventListener('click', event => {
+    const closeButton = event.target.closest?.('[data-login-action="close"]');
+    if (closeButton || event.target === overlay) {
+      pendingAfterLogin = null;
+      overlay.remove();
+    }
+  });
+}
+
+function renderLoginModal(overlay = document.querySelector('#loginOverlay')) {
   if (!overlay) return;
   const firebaseReady = Boolean(appConfig.auth?.firebase && appConfig.firebaseReady);
   if (loginState.stage === 'credentials') {
@@ -759,19 +788,15 @@ function renderLoginModal() {
         <button class="account-logout" data-login-action="logout">退出当前账号</button>
       </section>`;
   }
-  bindLoginActions();
+  bindLoginActions(overlay);
 }
 
-function bindLoginActions() {
-  const overlay = document.querySelector('#loginOverlay');
+function bindLoginActions(overlay = document.querySelector('#loginOverlay')) {
   if (!overlay) return;
   const useFirebase = Boolean(appConfig.auth?.firebase && appConfig.firebaseReady);
   overlay.querySelectorAll('[data-login-action]').forEach(button => button.addEventListener('click', async () => {
     const action = button.dataset.loginAction;
-    if (action === 'close') {
-      pendingAfterLogin = null;
-      overlay.remove();
-    }
+    if (action === 'close') return;
     if (action === 'toggle-auth-mode') {
       const email = overlay.querySelector('#loginEmail')?.value.trim() || loginState.email;
       loginState = {
@@ -866,12 +891,6 @@ function bindLoginActions() {
       }
     }
   }));
-  overlay.addEventListener('click', event => {
-    if (event.target === overlay) {
-      pendingAfterLogin = null;
-      overlay.remove();
-    }
-  });
 }
 
 async function completeFirebaseAuthentication(firebaseUser, isRegistration = false, silent = false) {
