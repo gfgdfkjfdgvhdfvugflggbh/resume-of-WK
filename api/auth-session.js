@@ -9,7 +9,7 @@ export default async function handler(request, response) {
     const body = bodyOf(request);
     const idToken = String(body.id_token || '').trim();
     if (!idToken) return json(response, 400, { error: 'FIREBASE_ID_TOKEN_REQUIRED' });
-    const decoded = await adminAuth().verifyIdToken(idToken, true);
+    const decoded = await adminAuth().verifyIdToken(idToken);
     const user = await ensureUser(decoded);
     await firestore().collection('sessions').doc(decoded.uid).set({ uid: decoded.uid, lastLoginAt: Date.now() }, { merge: true });
     return json(response, 200, { token: idToken, user: publicUser(user) });

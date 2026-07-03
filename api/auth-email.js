@@ -1,4 +1,6 @@
 import { bodyOf, json, method } from '../api-lib/http.js';
+import { adminAuth, firebaseAdminConfigured } from '../api-lib/firebase.js';
+import { ensureUser, publicUser } from '../api-lib/models.js';
 
 const DEFAULT_FIREBASE_API_KEY = 'AIzaSyC0FOEpZIjOJpcRrTX1Jm5cre6nOFewKLc';
 const IDENTITY_BASE = 'https://identitytoolkit.googleapis.com/v1';
@@ -19,7 +21,7 @@ async function firebaseRequest(url, { body, form = false } = {}) {
       ? { 'Content-Type': 'application/x-www-form-urlencoded' }
       : { 'Content-Type': 'application/json', 'X-Firebase-Locale': 'zh-CN' },
     body: form ? new URLSearchParams(body).toString() : JSON.stringify(body),
-    signal: AbortSignal.timeout(15000)
+    signal: AbortSignal.timeout(8000)
   });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
@@ -42,6 +44,17 @@ function publicAuthResult(data) {
   };
 }
 
+async function resultWithSession(data) {
+  const user = publicAuthResult(data);
+  if (!firebaseAdminConfigured() || !user.idToken) return { user };
+  const decoded = await adminAuth().verifyIdToken(user.idToken);
+  const storedUser = await ensureUser(decoded);
+  return {
+    user,
+    session: { token: user.idToken, user: publicUser(storedUser) }
+  };
+}
+
 export default async function handler(request, response) {
   if (!method(request, response, ['POST'])) return;
   try {
@@ -56,7 +69,7 @@ export default async function handler(request, response) {
         form: true,
         body: { grant_type: 'refresh_token', refresh_token: refreshToken }
       });
-      return json(response, 200, { user: publicAuthResult(data) });
+      return json(response, 200, await resultWithSession(data));
     }
 
     const email = String(body.email || '').trim().toLowerCase();
@@ -76,7 +89,7 @@ export default async function handler(request, response) {
     const data = await firebaseRequest(`${IDENTITY_BASE}/accounts:${endpoint}?key=${encodeURIComponent(key)}`, {
       body: { email, password, returnSecureToken: true }
     });
-    return json(response, 200, { user: publicAuthResult(data) });
+    return json(response, 200, await resultWithSession(data));
   } catch (error) {
     const code = error?.name === 'TimeoutError' ? 'AUTH_UPSTREAM_TIMEOUT' : String(error?.message || 'FIREBASE_AUTH_FAILED');
     const status = code === 'AUTH_UPSTREAM_TIMEOUT' ? 504 : [400, 401, 403].includes(error?.status) ? 401 : 502;

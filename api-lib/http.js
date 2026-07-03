@@ -22,7 +22,7 @@ export async function requireUser(request, response) {
     return null;
   }
   try {
-    return await adminAuth().verifyIdToken(token, true);
+    return await adminAuth().verifyIdToken(token);
   } catch (error) {
     console.error('Firebase token verification failed', error?.code || error?.message);
     json(response, 401, { error: 'INVALID_FIREBASE_TOKEN' });

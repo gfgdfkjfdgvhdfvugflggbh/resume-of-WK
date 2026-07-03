@@ -5,10 +5,11 @@ export async function ensureUser(decoded) {
   const db = firestore();
   const ref = db.collection('users').doc(decoded.uid);
   const today = chinaDateKey();
+  let resolvedUser = null;
   await db.runTransaction(async transaction => {
     const snapshot = await transaction.get(ref);
     if (!snapshot.exists) {
-      transaction.set(ref, {
+      resolvedUser = {
         uid: decoded.uid,
         email: String(decoded.email || '').toLowerCase(),
         provider: 'firebase',
@@ -16,18 +17,21 @@ export async function ensureUser(decoded) {
         freeCreditDate: today,
         createdAt: Date.now(),
         updatedAt: Date.now()
-      });
+      };
+      transaction.set(ref, resolvedUser);
       return;
     }
     const data = snapshot.data();
-    transaction.set(ref, {
+    const updates = {
       email: String(decoded.email || data.email || '').toLowerCase(),
       freeCredits: data.freeCreditDate === today ? Number(data.freeCredits || 0) : 3,
       freeCreditDate: today,
       updatedAt: Date.now()
-    }, { merge: true });
+    };
+    resolvedUser = { ...data, ...updates };
+    transaction.set(ref, updates, { merge: true });
   });
-  return (await ref.get()).data();
+  return resolvedUser;
 }
 
 export function publicUser(data) {

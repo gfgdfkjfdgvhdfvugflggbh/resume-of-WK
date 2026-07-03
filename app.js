@@ -6,6 +6,7 @@ let serverApiReady = false;
 let authToken = localStorage.getItem('sunny-auth-token') || '';
 let cachedServerOrders = [];
 let paymentPollTimer = null;
+let appConfigLoadPromise = null;
 let appConfig = {
   loaded: !backendMode,
   demoMode: false,
@@ -86,8 +87,12 @@ function orderStatusLabel(status) {
 
 async function syncServerSession() {
   if (!serverApiReady || !authToken) return false;
+  const requestedToken = authToken;
   try {
     const data = await apiRequest('/api/me');
+    // Ignore a response that belongs to an account which logged out (or was
+    // replaced) while this request was still travelling over the network.
+    if (!authToken || authToken !== requestedToken) return false;
     state.user = normalizeServerUser(data.user);
     state.entitlement = normalizeServerEntitlement(data.entitlement);
     cachedServerOrders = (data.orders || []).map(normalizeServerOrder);
@@ -96,7 +101,7 @@ async function syncServerSession() {
     refreshDownloadUI();
     return true;
   } catch (error) {
-    if (error.status === 401) {
+    if (error.status === 401 && authToken === requestedToken) {
       authToken = '';
       localStorage.removeItem('sunny-auth-token');
       state.user = null;
@@ -108,45 +113,49 @@ async function syncServerSession() {
 }
 
 async function loadAppConfig() {
-  let serverConfig = {};
-  try {
-    if (backendMode) {
-      const candidate = await apiRequest('/api/config');
-      if (candidate?.auth) {
-        serverConfig = candidate;
-        serverApiReady = true;
+  if (appConfigLoadPromise) return appConfigLoadPromise;
+  appConfigLoadPromise = (async () => {
+    let serverConfig = {};
+    try {
+      if (backendMode) {
+        const candidate = await apiRequest('/api/config');
+        if (candidate?.auth) {
+          serverConfig = candidate;
+          serverApiReady = true;
+        }
+      }
+    } catch (_) {}
+
+    const firebaseConfig = serverConfig.firebase || window.FIREBASE_CONFIG || null;
+    appConfig = {
+      ...appConfig,
+      ...serverConfig,
+      loaded: true,
+      demoMode: false,
+      firebase: firebaseConfig,
+      serverAuthEnabled: Boolean(serverConfig.auth?.firebase),
+      auth: {
+        ...(serverConfig.auth || {}),
+        firebase: Boolean(firebaseConfig),
+        email: Boolean(firebaseConfig),
+        sms: false,
+        wechat: false,
+        apple: false
+      }
+    };
+    if (appConfig.auth.firebase && window.firebaseAuthClient) {
+      try {
+        appConfig.firebaseReady = await window.firebaseAuthClient.initialize(firebaseConfig, {
+          proxy: Boolean(serverConfig.auth?.proxy)
+        });
+      } catch (error) {
+        console.error('Firebase Authentication 初始化失败', error);
+        appConfig.firebaseReady = false;
       }
     }
-  } catch (_) {}
-
-  const firebaseConfig = serverConfig.firebase || window.FIREBASE_CONFIG || null;
-  appConfig = {
-    ...appConfig,
-    ...serverConfig,
-    loaded: true,
-    demoMode: false,
-    firebase: firebaseConfig,
-    serverAuthEnabled: Boolean(serverConfig.auth?.firebase),
-    auth: {
-      ...(serverConfig.auth || {}),
-      firebase: Boolean(firebaseConfig),
-      email: Boolean(firebaseConfig),
-      sms: false,
-      wechat: false,
-      apple: false
-    }
-  };
-  if (appConfig.auth.firebase && window.firebaseAuthClient) {
-    try {
-      appConfig.firebaseReady = await window.firebaseAuthClient.initialize(firebaseConfig, {
-        proxy: Boolean(serverConfig.auth?.proxy)
-      });
-    } catch (error) {
-      console.error('Firebase Authentication 初始化失败', error);
-      appConfig.firebaseReady = false;
-    }
-  }
-  return appConfig;
+    return appConfig;
+  })();
+  return appConfigLoadPromise;
 }
 
 const state = {
@@ -727,7 +736,6 @@ async function openLoginModal() {
 
   try {
     await loadAppConfig();
-    if (serverApiReady && authToken) await syncServerSession();
   } catch (error) {
     console.warn('打开账号中心时同步失败', error);
   }
@@ -735,6 +743,13 @@ async function openLoginModal() {
 
   loginState = { stage: state.user ? 'account' : 'credentials', mode: 'signin', email: state.user?.email || '', error: '' };
   renderLoginModal(overlay);
+  if (serverApiReady && authToken) {
+    syncServerSession().then(success => {
+      if (!success || !overlay.isConnected) return;
+      loginState = { stage: state.user ? 'account' : 'credentials', mode: 'signin', email: state.user?.email || '', error: '' };
+      renderLoginModal(overlay);
+    });
+  }
 }
 
 function bindLoginOverlayDismiss(overlay) {
@@ -894,6 +909,12 @@ function bindLoginActions(overlay = document.querySelector('#loginOverlay')) {
 }
 
 async function completeFirebaseAuthentication(firebaseUser, isRegistration = false, silent = false) {
+  if (firebaseUser.serverSession?.token && firebaseUser.serverSession?.user) {
+    authToken = firebaseUser.serverSession.token;
+    localStorage.setItem('sunny-auth-token', authToken);
+    completeServerLogin(firebaseUser.serverSession.user, silent);
+    return;
+  }
   if (serverApiReady && appConfig.serverAuthEnabled) {
     try {
       const result = await apiRequest('/api/auth-session', {
@@ -903,7 +924,7 @@ async function completeFirebaseAuthentication(firebaseUser, isRegistration = fal
       if (!result?.token || !result?.user) throw Object.assign(new Error('BACKEND_UNAVAILABLE'), { status: 404 });
       authToken = result.token;
       localStorage.setItem('sunny-auth-token', authToken);
-      await completeServerLogin(result.user, silent);
+      completeServerLogin(result.user, silent);
       return;
     } catch (error) {
       if (![404, 405, 503].includes(error.status)) throw error;
@@ -926,11 +947,19 @@ async function completeProviderLogin(provider) {
   location.href = `/api/auth/oauth/${provider}/start`;
 }
 
-async function completeServerLogin(user, silent = false) {
+function removeLoginOverlays() {
+  document.querySelectorAll('.login-overlay').forEach(overlay => overlay.remove());
+}
+
+function completeServerLogin(user, silent = false) {
   state.user = normalizeServerUser(user);
-  await syncServerSession();
-  document.querySelector('#loginOverlay')?.remove();
+  state.entitlement = { plan: 'none', credits: 0 };
+  cachedServerOrders = [];
+  saveCurrentUser();
+  updateAccountHeader();
+  removeLoginOverlays();
   if (!silent) showToast(`登录成功，今日免费额度剩余 ${state.user?.freeCredits ?? 0} 次`);
+  syncServerSession();
   if (pendingAfterLogin?.startsWith('download:')) {
     const format = pendingAfterLogin.split(':')[1] || 'word';
     pendingAfterLogin = null;
@@ -944,7 +973,7 @@ function completeLogin(identity, { isRegistration = false, silent = false } = {}
   saveCurrentUser();
   state.entitlement = loadEntitlement(state.user.id);
   updateAccountHeader();
-  document.querySelector('#loginOverlay')?.remove();
+  removeLoginOverlays();
   if (!silent) showToast(existing ? '欢迎回来，已识别当前账号' : (isRegistration ? '注册成功，已领取今日 3 次免费下载' : '登录成功，已领取今日 3 次免费下载'));
   if (pendingAfterLogin?.startsWith('download:')) {
     const format = pendingAfterLogin.split(':')[1] || 'word';
@@ -953,19 +982,19 @@ function completeLogin(identity, { isRegistration = false, silent = false } = {}
   }
 }
 
-async function logoutUser() {
-  if (serverApiReady && authToken) {
-    try { await apiRequest('/api/auth/logout', { method: 'POST', body: {} }); } catch (_) {}
-  }
+function logoutUser() {
+  // Firebase ID tokens are stateless. Clear the browser session first so
+  // logout is instant even when the mobile network is slow.
   localStorage.removeItem('sunny-current-user');
   localStorage.removeItem('sunny-auth-token');
-  try { await window.firebaseAuthClient?.logout(); } catch (_) {}
   authToken = '';
   state.user = null;
   state.entitlement = { plan: 'none', credits: 0 };
-  document.querySelector('#loginOverlay')?.remove();
+  cachedServerOrders = [];
+  removeLoginOverlays();
   updateAccountHeader();
   showToast('已退出账号');
+  try { Promise.resolve(window.firebaseAuthClient?.logout()).catch(() => {}); } catch (_) {}
 }
 
 function loadOrders() {

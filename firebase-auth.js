@@ -60,28 +60,35 @@
   }
 
   async function proxyRequest(body) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 9000);
     let response;
     try {
       response = await fetch('/api/auth-email', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body)
+        body: JSON.stringify(body),
+        signal: controller.signal
       });
     } catch (_) {
       throw authError('AUTH_UPSTREAM_TIMEOUT');
+    } finally {
+      clearTimeout(timeout);
     }
     const data = await response.json().catch(() => ({}));
     if (!response.ok) throw authError(String(data.error || 'FIREBASE_AUTH_FAILED').split(' : ')[0]);
     return data;
   }
 
-  function proxyUserResult(user) {
+  function proxyUserResult(payload) {
+    const user = payload.user || payload;
     if (user.refreshToken) localStorage.setItem(REFRESH_TOKEN_KEY, user.refreshToken);
     return {
       uid: user.uid,
       email: user.email || '',
       displayName: user.displayName || '',
-      idToken: user.idToken
+      idToken: user.idToken,
+      serverSession: payload.session || null
     };
   }
 
@@ -96,14 +103,14 @@
 
   async function signUpWithEmail(email, password) {
     if (!initialized) throw new Error('FIREBASE_NOT_INITIALIZED');
-    if (mode === 'proxy') return proxyUserResult((await proxyRequest({ action: 'signup', email, password })).user);
+    if (mode === 'proxy') return proxyUserResult(await proxyRequest({ action: 'signup', email, password }));
     const credential = await authSdk.createUserWithEmailAndPassword(auth, email, password);
     return sdkUserResult(credential.user);
   }
 
   async function signInWithEmail(email, password) {
     if (!initialized) throw new Error('FIREBASE_NOT_INITIALIZED');
-    if (mode === 'proxy') return proxyUserResult((await proxyRequest({ action: 'signin', email, password })).user);
+    if (mode === 'proxy') return proxyUserResult(await proxyRequest({ action: 'signin', email, password }));
     const credential = await authSdk.signInWithEmailAndPassword(auth, email, password);
     return sdkUserResult(credential.user);
   }
@@ -123,7 +130,7 @@
       const refreshToken = localStorage.getItem(REFRESH_TOKEN_KEY) || '';
       if (!refreshToken) return null;
       try {
-        return proxyUserResult((await proxyRequest({ action: 'refresh', refresh_token: refreshToken })).user);
+        return proxyUserResult(await proxyRequest({ action: 'refresh', refresh_token: refreshToken }));
       } catch (error) {
         if (error.code === 'auth/invalid-refresh-token') localStorage.removeItem(REFRESH_TOKEN_KEY);
         throw error;
