@@ -1,4 +1,12 @@
 {
+  "rewrites": [
+    { "source": "/api/config", "destination": "/api/config.js" },
+    { "source": "/api/auth-session", "destination": "/api/auth-session.js" },
+    { "source": "/api/me", "destination": "/api/me.js" },
+    { "source": "/api/orders", "destination": "/api/orders.js" },
+    { "source": "/api/admin-confirm", "destination": "/api/admin-confirm.js" },
+    { "source": "/api/quota-consume", "destination": "/api/quota-consume.js" }
+  ],
   "headers": [
     {
       "source": "/index.html",
