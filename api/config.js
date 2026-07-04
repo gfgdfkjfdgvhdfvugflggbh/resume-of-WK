@@ -22,6 +22,7 @@ export default async function handler(request, response) {
       pro: process.env.XIANYU_PRO_URL || process.env.XIANYU_ITEM_URL || DEFAULT_XIANYU_URLS.pro
     },
     directPaymentEnabled: false,
-    redemptionEnabled: false
+    redemptionEnabled: false,
+    englishResumeEnabled: Boolean(process.env.OPENAI_API_KEY)
   });
 }

@@ -9,8 +9,17 @@ function xianyuDocumentId(orderNo) {
 }
 
 export default async function handler(request, response) {
-  if (!method(request, response, ['POST'])) return;
+  if (!method(request, response, ['GET', 'POST'])) return;
   if (!requireAdmin(request, response)) return;
+  const db = firestore();
+  if (request.method === 'GET') {
+    const snapshot = await db.collection('orders').where('status', '==', 'VERIFYING').limit(100).get();
+    const orders = snapshot.docs
+      .map(document => document.data())
+      .sort((a, b) => Number(a.claimSubmittedAt || a.createdAt || 0) - Number(b.claimSubmittedAt || b.createdAt || 0))
+      .map(publicOrder);
+    return json(response, 200, { orders });
+  }
   const body = bodyOf(request);
   const websiteOrderNo = String(body.website_order_no || '').trim();
   const xianyuOrderNo = String(body.xianyu_order_no || '').trim();
@@ -19,7 +28,6 @@ export default async function handler(request, response) {
     return json(response, 400, { error: 'INVALID_CONFIRMATION_DATA' });
   }
 
-  const db = firestore();
   try {
     const result = await db.runTransaction(async transaction => {
       const orderRef = db.collection('orders').doc(websiteOrderNo);
@@ -36,8 +44,9 @@ export default async function handler(request, response) {
         if (order.xianyuOrderNo !== xianyuOrderNo) throw new Error('ORDER_ALREADY_CONFIRMED');
         return { order, idempotent: true };
       }
+      if (order.xianyuClaimNo && order.xianyuClaimNo !== xianyuOrderNo) throw new Error('CLAIM_MISMATCH');
       if (xianyuSnapshot.exists && xianyuSnapshot.data().websiteOrderNo !== websiteOrderNo) throw new Error('XIANYU_ORDER_ALREADY_USED');
-      if (order.status !== 'PENDING') throw new Error('INVALID_ORDER_STATUS');
+      if (!['PENDING', 'VERIFYING'].includes(order.status)) throw new Error('INVALID_ORDER_STATUS');
 
       const entitlementRef = db.collection('entitlements').doc(order.uid);
       const entitlementSnapshot = await transaction.get(entitlementRef);
@@ -80,7 +89,7 @@ export default async function handler(request, response) {
     return json(response, 200, { ok: true, idempotent: result.idempotent, order: publicOrder(result.order) });
   } catch (error) {
     const code = error?.message || 'CONFIRMATION_FAILED';
-    const status = code === 'ORDER_NOT_FOUND' ? 404 : ['XIANYU_ORDER_ALREADY_USED', 'ORDER_ALREADY_CONFIRMED'].includes(code) ? 409 : 400;
+    const status = code === 'ORDER_NOT_FOUND' ? 404 : ['XIANYU_ORDER_ALREADY_USED', 'ORDER_ALREADY_CONFIRMED', 'CLAIM_MISMATCH'].includes(code) ? 409 : 400;
     return json(response, status, { error: code });
   }
 }

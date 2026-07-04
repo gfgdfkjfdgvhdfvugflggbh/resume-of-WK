@@ -68,6 +68,7 @@ export function publicOrder(data) {
     method: 'xianyu',
     amount: data.amount,
     status: data.status,
+    xianyu_claim_no: data.xianyuClaimNo || '',
     xianyu_order_no: data.xianyuOrderNo || null,
     created_at: Math.floor(Number(data.createdAt || Date.now()) / 1000),
     paid_at: data.paidAt ? Math.floor(Number(data.paidAt) / 1000) : null,

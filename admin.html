@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>向晴简历｜闲鱼订单发货台</title>
-    <link rel="stylesheet" href="./styles.css?v=20260702-xianyu-order-1">
+    <link rel="stylesheet" href="./styles.css?v=20260703-xianyu-claim-1">
   </head>
   <body class="admin-body">
     <main class="admin-shell">
@@ -12,6 +12,8 @@
       <section class="admin-card">
         <div class="admin-warning">本页面仅供卖家使用。必须先在闲鱼卖家端确认订单确实已付款，再点击确认；系统会直接向网站订单绑定的 Firebase 账号发放权益。</div>
         <label><span>后台密钥</span><input id="adminSecret" type="password" placeholder="请输入 ADMIN_SECRET"></label>
+        <button id="loadPendingOrders" class="admin-secondary">读取用户提交的待核款申请</button>
+        <div id="pendingOrderQueue" class="admin-queue"><p>输入后台密钥后读取待核款申请。</p></div>
         <label><span>网站订单号</span><input id="websiteOrder" placeholder="例如 XQ2026070215300012345"></label>
         <label><span>闲鱼订单号</span><input id="xianyuOrder" placeholder="复制闲鱼卖家端已付款订单号"></label>
         <label><span>闲鱼实付金额</span><input id="paidAmount" inputmode="decimal" placeholder="例如 2.98、19.8 或 29.8"></label>
@@ -19,8 +21,8 @@
         <p class="admin-demo">套餐和应付金额以网站订单为准，后台会再次校验；同一闲鱼订单号不能给两个账号重复发放。</p>
         <div id="adminResult" class="admin-result" aria-live="polite"></div>
       </section>
-      <section class="admin-steps"><b>核款流程</b><ol><li>买家从网站生成订单，并在闲鱼聊天中发来网站订单号。</li><li>在闲鱼卖家端确认该买家订单已付款。</li><li>复制网站订单号、闲鱼订单号，并填写实付金额。</li><li>点击确认，系统事务性标记到账并发放权益。</li><li>买家页面自动显示“已到账 / 已发放”。</li></ol></section>
+      <section class="admin-steps"><b>核款流程</b><ol><li>买家从网站选择套餐并生成网站订单。</li><li>买家在闲鱼付款，回到网站提交闲鱼订单号。</li><li>点击“读取待核款申请”，选择一笔申请。</li><li>在闲鱼卖家端核对该订单号、商品和实付金额。</li><li>确认收款后释放权益，买家页面会自动显示成功。</li></ol></section>
     </main>
-    <script src="./admin.js?v=20260702-xianyu-order-1"></script>
+    <script src="./admin.js?v=20260703-xianyu-claim-1"></script>
   </body>
 </html>

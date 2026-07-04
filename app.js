@@ -72,13 +72,15 @@ function normalizeServerOrder(order) {
     method: order.method,
     methodName: order.method === 'xianyu' ? '闲鱼付款' : order.method === 'wechat' ? '微信支付' : '支付宝',
     status: order.status,
+    xianyuClaimNo: order.xianyu_claim_no || order.xianyuClaimNo || '',
     grantText: order.grant_text || (order.plan === 'single' ? '单次简历下载额度 × 1' : order.plan === 'basic' ? '30 天会员 · 每周 35 次优化额度' : '30 天无限会员 · 不限次数')
   };
 }
 
 function orderStatusLabel(status) {
   if (status === 'FULFILLED') return '已到账 / 已发放';
-  if (status === 'PENDING') return '等待闲鱼核款';
+  if (status === 'VERIFYING') return '已报付款 / 待核款';
+  if (status === 'PENDING') return '待提交闲鱼订单号';
   if (status === 'PAID') return '已到账 / 发放中';
   if (status === 'CLOSED') return '已关闭';
   if (status === 'REFUNDED') return '已退款';
@@ -160,11 +162,17 @@ async function loadAppConfig() {
 
 const state = {
   view: 'landing',
+  workflow: 'optimize',
   applicantType: '',
   file: null,
   rawResumeText: '',
   parsed: false,
   parseMode: 'pending',
+  resumeLanguage: 'zh',
+  optimizedResumeText: '',
+  englishSource: '',
+  englishSourceType: '',
+  englishResult: null,
   user: loadCurrentUser(),
   entitlement: null,
   form: {
@@ -180,12 +188,12 @@ const plans = {
 
 state.entitlement = loadEntitlement(state.user?.id);
 
-let paymentState = { plan: 'single', method: 'wechat', stage: 'choose', orderNo: '', qrCode: '', demo: !backendMode, downloadFormat: 'word' };
+let paymentState = { plan: 'single', method: 'wechat', stage: 'choose', orderNo: '', xianyuOrderNo: '', qrCode: '', demo: !backendMode, downloadFormat: 'word' };
 let pendingAfterLogin = null;
 let loginState = { stage: 'credentials', mode: 'signin', email: '', error: '' };
 
 const icons = {
-  graduate: '🎓', experienced: '🧭', upload: '↥'
+  graduate: '🎓', experienced: '🧭', upload: '↥', english: 'EN'
 };
 
 function loadCurrentUser() {
@@ -318,17 +326,62 @@ function renderLanding() {
             <span class="path-arrow">→</span>
           </button>
         </div>
+        <button class="english-entry" data-action="english-start">
+          <span class="english-entry-icon">EN</span>
+          <span><strong>制作英文简历</strong><small>上传原简历直接转英文，或把网页优化版转换成专业英文版</small></span>
+          <span class="path-arrow">→</span>
+        </button>
         <div class="trust-strip"><span>✓ 隐私保护</span><span>✓ Word 可编辑</span><span>✓ 约 2 分钟</span></div>
       </div>
     </section>`;
 
   app.querySelectorAll('[data-type]').forEach(button => {
     button.addEventListener('click', () => {
+      state.workflow = 'optimize';
       state.applicantType = button.dataset.type;
       saveDraft();
       renderImport();
     });
   });
+  app.querySelector('[data-action="english-start"]').addEventListener('click', renderEnglishSourceChoice);
+}
+
+function renderEnglishSourceChoice() {
+  state.view = 'english-source';
+  const hasOptimizedResume = Boolean(state.optimizedResumeText.trim());
+  app.innerHTML = `
+    <section class="workspace english-source-workspace">
+      <div class="progress-wrap"><button class="back-link" data-action="back-home">← 返回首页</button><div></div><span></span></div>
+      <div class="english-source-card">
+        <div class="english-source-heading"><span class="eyebrow">English Resume</span><h1>你想从哪一版开始？</h1><p>只转换语言和表达方式，不改变公司、时间、岗位、项目或数据事实。</p></div>
+        <div class="english-source-options">
+          <button data-english-source="original"><span class="source-number">01</span><b>上传原简历转英文</b><p>适合已经有中文简历，只需要一份国际化、ATS 友好的英文版本。</p><em>上传 Word / PDF / TXT →</em></button>
+          <button data-english-source="optimized" ${hasOptimizedResume ? '' : 'disabled'}><span class="source-number">02</span><b>网页优化版转英文</b><p>${hasOptimizedResume ? '保留刚刚针对 JD 优化后的重点，再转换成专业英文表达。' : '请先完成一次中文简历优化，之后这里会自动出现可转换版本。'}</p><em>${hasOptimizedResume ? '使用优化版继续 →' : '暂无优化版'}</em></button>
+        </div>
+        <div class="english-quota-note"><span>3</span><p><b>沿用现有免费额度</b><br>英文版预览和编辑不扣次数；下载 Word 或 PDF 时，与中文版共用每天 3 次免费额度。</p></div>
+      </div>
+    </section>`;
+  app.querySelector('[data-action="back-home"]').addEventListener('click', renderLanding);
+  app.querySelector('[data-english-source="original"]').addEventListener('click', () => {
+    state.workflow = 'english-original';
+    renderEnglishImport();
+  });
+  const optimizedButton = app.querySelector('[data-english-source="optimized"]');
+  if (!optimizedButton.disabled) optimizedButton.addEventListener('click', () => beginEnglishGeneration('optimized', state.optimizedResumeText));
+}
+
+function renderEnglishImport() {
+  state.view = 'english-import';
+  app.innerHTML = `
+    <section class="workspace import-workspace">
+      <div class="progress-wrap"><button class="back-link" data-action="back-english">← 返回英文简历选择</button><div></div><span></span></div>
+      <div class="import-card english-import-card">
+        <div class="import-copy"><span class="eyebrow">Original → English</span><h1>上传原简历，<br>转换成专业英文版。</h1><p>系统会先提取真实文字，再按英文招聘语境调整表达。所有公司、时间、项目、职位和数字保持不变。</p><div class="parse-preview"><span>转换原则</span><b>不虚构经历</b><b>ATS 友好</b><b>专业动词</b><b>Word 可编辑</b></div></div>
+        <div class="import-upload"><div class="upload-zone upload-zone-large" id="uploadZone"><input id="resumeFile" type="file" accept=".doc,.docx,.pdf,.txt"><span class="upload-symbol">${icons.english}</span><span><strong>上传需要转换的简历</strong><small>支持 DOCX、PDF、TXT<br>文件最大 10MB</small></span><em>选择文件</em></div><div class="privacy-card"><span>🔒</span><p><b>原文只用于本次英文转换</b><br>不会把未写过的经历翻译进简历。</p></div></div>
+      </div>
+    </section>`;
+  app.querySelector('[data-action="back-english"]').addEventListener('click', renderEnglishSourceChoice);
+  bindUpload();
 }
 
 function renderImport() {
@@ -369,6 +422,15 @@ function progressHTML(active = 2) {
     const n = i + 1;
     const cls = n === active ? 'active' : n < active ? 'done' : '';
     return `<div class="progress-step ${cls}"><span>${n < active ? '✓' : n}</span>${label}</div>`;
+  }).join('');
+}
+
+function englishProgressHTML(active = 4) {
+  const labels = ['读取简历', '英文转换', '检查事实', '完成'];
+  return labels.map((label, index) => {
+    const number = index + 1;
+    const cls = number === active ? 'active' : number < active ? 'done' : '';
+    return `<div class="progress-step ${cls}"><span>${number < active ? '✓' : number}</span>${label}</div>`;
   }).join('');
 }
 
@@ -515,8 +577,16 @@ async function parseResume(file) {
   setTimeout(() => {
     state.parsed = true;
     saveDraft();
-    renderForm();
-    showToast('简历读取完成，请确认识别结果');
+    if (state.workflow === 'english-original') {
+      if (!state.rawResumeText.trim()) {
+        renderEnglishError('没有从文件中读取到可转换文字，请改用 DOCX、文字型 PDF 或 TXT 文件。', 'original');
+        return;
+      }
+      beginEnglishGeneration('original', state.rawResumeText);
+    } else {
+      renderForm();
+      showToast('简历读取完成，请确认识别结果');
+    }
   }, 1300);
 }
 
@@ -634,7 +704,7 @@ function renderResult() {
         <div class="resume-panel">
           <div class="resume-toolbar">
             <strong>优化版简历 · 共 2 页 · 可直接点击正文修改</strong>
-            <div class="toolbar-actions"><button class="tool-button compare" data-action="compare">⇄ 左右对比</button><button class="tool-button" data-action="copy">复制全文</button><button class="tool-button download" data-action="download" data-format="word">Word</button><button class="tool-button pdf-tool" data-action="download" data-format="pdf">PDF</button></div>
+            <div class="toolbar-actions"><button class="tool-button compare" data-action="compare">⇄ 左右对比</button><button class="tool-button english-tool" data-action="english-optimized">EN 英文版</button><button class="tool-button" data-action="copy">复制全文</button><button class="tool-button download" data-action="download" data-format="word">Word</button><button class="tool-button pdf-tool" data-action="download" data-format="pdf">PDF</button></div>
           </div>
           <div class="resume-document" id="resumePaper" contenteditable="true" spellcheck="false">
             <article class="resume-paper resume-page">
@@ -669,7 +739,117 @@ function renderResult() {
   app.querySelector('[data-action="edit-form"]').addEventListener('click', renderForm);
   app.querySelector('[data-action="compare"]').addEventListener('click', openComparison);
   app.querySelector('[data-action="copy"]').addEventListener('click', copyResume);
+  app.querySelector('[data-action="english-optimized"]').addEventListener('click', () => {
+    const source = document.querySelector('#resumePaper')?.innerText.trim() || '';
+    state.optimizedResumeText = source;
+    beginEnglishGeneration('optimized', source);
+  });
   app.querySelectorAll('[data-action="download"]').forEach(button => button.addEventListener('click', () => requestDownload(button.dataset.format || 'word')));
+  state.resumeLanguage = 'zh';
+  state.optimizedResumeText = document.querySelector('#resumePaper')?.innerText.trim() || '';
+}
+
+async function beginEnglishGeneration(sourceType, sourceText) {
+  const source = String(sourceText || '').trim();
+  if (source.length < 40) return renderEnglishError('可转换的简历文字太少，请上传内容完整的 DOCX、文字型 PDF 或 TXT 文件。', sourceType);
+  state.englishSourceType = sourceType;
+  state.englishSource = source;
+  if (!state.user) {
+    pendingAfterLogin = `english:${sourceType}`;
+    openLoginModal();
+    return;
+  }
+
+  renderEnglishLoading(sourceType);
+  try {
+    const result = await apiRequest('/api/resume-english', {
+      method: 'POST',
+      body: {
+        source_type: sourceType,
+        source_text: source,
+        profile: {
+          name: state.form.name || '',
+          target_role: state.form.position || '',
+          industry: state.form.industry || '',
+          applicant_type: state.applicantType || ''
+        }
+      }
+    });
+    state.englishResult = result.resume;
+    state.resumeLanguage = 'en';
+    renderEnglishResult();
+  } catch (error) {
+    const message = error.status === 503
+      ? '英文转换服务还没有配置 API 密钥，管理员完成配置后即可使用。'
+      : error.status === 413
+        ? '这份简历文字过长，请精简到 30,000 字以内后重试。'
+        : error.status === 401
+          ? '登录状态已过期，请重新登录后再转换。'
+          : '英文转换暂时没有完成，请稍后再试。你的原简历不会丢失。';
+    renderEnglishError(message, sourceType);
+  }
+}
+
+function renderEnglishLoading(sourceType) {
+  state.view = 'english-loading';
+  app.innerHTML = `
+    <section class="loading-page english-loading-page">
+      <div class="loading-card">
+        <div class="loading-art"><div class="loading-ring"></div><div class="loading-center">EN</div></div>
+        <span class="eyebrow">${sourceType === 'optimized' ? 'Optimized Resume → English' : 'Original Resume → English'}</span>
+        <h1>正在转换成专业英文简历</h1>
+        <p>不仅逐句翻译，还会统一时态、动作动词和英文招聘表达；所有公司、日期、职位、数字与项目事实保持不变。</p>
+        <div class="loading-list"><div class="loading-item done"><b>✓</b><span>读取中文简历事实</span></div><div class="loading-item active"><b>2</b><span>转换成专业英文表达</span></div><div class="loading-item"><b>3</b><span>检查事实与 ATS 结构</span></div><div class="loading-item"><b>4</b><span>生成可编辑双页版本</span></div></div>
+      </div>
+    </section>`;
+}
+
+function renderEnglishError(message, sourceType = state.englishSourceType || 'original') {
+  state.view = 'english-error';
+  app.innerHTML = `
+    <section class="loading-page"><div class="english-error-card"><span>EN</span><h1>这次没有转换完成</h1><p>${escapeHTML(message)}</p><div><button class="ghost-button" data-action="english-back">返回</button>${state.englishSource.trim() ? '<button class="primary-button" data-action="english-retry">重新转换</button>' : ''}</div></div></section>`;
+  app.querySelector('[data-action="english-back"]').addEventListener('click', sourceType === 'optimized' ? renderResult : renderEnglishImport);
+  const retry = app.querySelector('[data-action="english-retry"]');
+  if (retry) retry.addEventListener('click', () => beginEnglishGeneration(sourceType, state.englishSource));
+}
+
+function renderEnglishResult() {
+  const resume = state.englishResult;
+  if (!resume) return renderEnglishError('没有找到英文简历结果，请重新转换。');
+  state.view = 'english-result';
+  state.resumeLanguage = 'en';
+  const access = getDownloadAccess();
+  const sections = Array.isArray(resume.sections) ? resume.sections : [];
+  const splitAt = Math.max(1, Math.ceil(sections.length / 2));
+  const firstPageSections = sections.slice(0, splitAt);
+  const secondPageSections = sections.slice(splitAt);
+  const sourceLabel = state.englishSourceType === 'optimized' ? '网页优化版 → 英文版' : '上传原简历 → 英文版';
+  app.innerHTML = `
+    <section class="result-shell english-result-shell">
+      <div class="progress-wrap"><button class="back-link" data-action="english-result-back">← 返回上一版</button><div class="progress">${englishProgressHTML(4)}</div><span></span></div>
+      <div class="success-banner english-success-banner"><div><div class="strategy-result-tag">EN · ${sourceLabel}</div><h1>Your English resume is ready ✨</h1><p>事实保持不变，表达已调整为专业英文招聘语境。正文仍可直接点击修改。</p></div><div class="match-score"><strong>ATS</strong><small>Friendly Format</small></div></div>
+      <div class="download-dock"><div class="download-dock-copy"><span class="word-badge">EN</span><p><b>Professional English Resume</b><small>Editable Word · Application-ready PDF</small></p></div><div class="download-dock-action"><span>${access.allowed ? access.description : '中英文版共用同一下载额度'}</span><div class="download-format-buttons"><button class="primary-button download-primary word-download" data-action="download" data-format="word">下载 Word</button><button class="primary-button download-primary pdf-download" data-action="download" data-format="pdf">下载 PDF</button></div></div></div>
+      <div class="download-status" id="downloadStatus" aria-live="polite"></div>
+      <div class="result-grid">
+        <aside class="analysis-panel english-analysis-panel"><h2>English resume checks</h2><div class="strategy-boundary social-boundary"><b>Source: ${escapeHTML(sourceLabel)}</b><p>Company names, dates, roles, projects and metrics must remain traceable to the source resume.</p></div><div class="english-check-list"><span>✓ Professional action verbs</span><span>✓ Consistent tense</span><span>✓ ATS-friendly headings</span><span>✓ No invented experience</span></div><div class="analysis-tip"><b>下载额度不变</b><br>预览和手动编辑免费；下载 Word 或 PDF 时，与中文版共用每天 3 次免费额度。</div></aside>
+        <div class="resume-panel"><div class="resume-toolbar"><strong>English Resume · Editable</strong><div class="toolbar-actions"><button class="tool-button english-tool" data-action="english-regenerate">重新转换</button><button class="tool-button" data-action="copy">Copy all</button><button class="tool-button download" data-action="download" data-format="word">Word</button><button class="tool-button pdf-tool" data-action="download" data-format="pdf">PDF</button></div></div>
+          <div class="resume-document english-resume-document" id="resumePaper" contenteditable="true" spellcheck="true">
+            <article class="resume-paper resume-page english-resume-page"><div class="page-number">01 / 02</div><div class="resume-head"><div><h1>${escapeHTML(resume.name || state.form.name || 'Candidate')}</h1><p>${escapeHTML(resume.headline || state.form.position || 'Professional Resume')}</p></div><div class="resume-contact">${(resume.contact || []).map(item => escapeHTML(item)).join('<br>')}</div></div><section class="resume-section"><h2>PROFESSIONAL SUMMARY</h2><p>${escapeHTML(resume.summary || '')}</p></section>${firstPageSections.map(renderEnglishSection).join('')}</article>
+            <div class="page-break-label"><span>PAGE 2</span></div>
+            <article class="resume-paper resume-page english-resume-page"><div class="page-number">02 / 02</div><div class="resume-page-title"><b>${escapeHTML(resume.name || state.form.name || 'Candidate')}</b><span>${escapeHTML(resume.headline || 'Professional Resume')}</span></div>${secondPageSections.length ? secondPageSections.map(renderEnglishSection).join('') : '<section class="resume-section"><h2>ADDITIONAL INFORMATION</h2><p>Add certifications, languages, portfolios or other relevant information here.</p></section>'}</article>
+          </div><p class="edit-note">The English version is editable. Review proper nouns and preferred name spelling before downloading.</p>
+        </div>
+      </div>
+    </section>`;
+  app.querySelector('[data-action="english-result-back"]').addEventListener('click', state.englishSourceType === 'optimized' ? renderResult : renderEnglishSourceChoice);
+  app.querySelector('[data-action="english-regenerate"]').addEventListener('click', () => beginEnglishGeneration(state.englishSourceType, state.englishSource));
+  app.querySelector('[data-action="copy"]').addEventListener('click', copyResume);
+  app.querySelectorAll('[data-action="download"]').forEach(button => button.addEventListener('click', () => requestDownload(button.dataset.format || 'word')));
+}
+
+function renderEnglishSection(section) {
+  const entries = Array.isArray(section.entries) ? section.entries : [];
+  return `<section class="resume-section"><h2>${escapeHTML(section.title || 'EXPERIENCE')}</h2>${entries.map(entry => `<div class="experience"><div class="experience-title"><strong>${escapeHTML(entry.heading || '')}</strong><span>${escapeHTML(entry.date || '')}</span></div>${entry.subheading ? `<h3>${escapeHTML(entry.subheading)}</h3>` : ''}${Array.isArray(entry.bullets) && entry.bullets.length ? `<ul>${entry.bullets.map(bullet => `<li>${escapeHTML(bullet)}</li>`).join('')}</ul>` : ''}</div>`).join('')}</section>`;
 }
 
 function openComparison() {
@@ -797,9 +977,9 @@ function renderLoginModal(overlay = document.querySelector('#loginOverlay')) {
         <h2 id="accountTitle">${escapeHTML(state.user.displayName || state.user.email || maskPhone(state.user.phone))}</h2>
         <p class="account-id">用户 ID：${escapeHTML(state.user.id)}</p>
         <div class="account-benefits"><div><span>今日剩余免费额度</span><strong>${state.user.freeCredits || 0}<i> 次</i></strong></div><div><span>当前会员</span><strong>${memberName}</strong></div></div>
-        ${serverApiReady ? '<div class="redeem-card order-bind-card"><div><b>闲鱼订单自动绑定账号</b><small>网站创建订单后，请把网站订单号发给闲鱼卖家。卖家确认到账，权益会自动进入当前邮箱账号，无需兑换码。</small></div></div>' : '<div class="redeem-card"><div><b>闲鱼兑换码</b><small>已在闲鱼付款？把卖家发给你的兑换码填在这里。</small></div><div><input id="redeemCode" maxlength="20" placeholder="例如 XQ-ABCD-EFGH-JKLM"><button data-login-action="redeem">确认兑换</button></div><p id="redeemError"></p></div>'}
+        ${serverApiReady ? '<div class="redeem-card order-bind-card"><div><b>闲鱼付款与当前账号绑定</b><small>付款后点击下方订单的“查看付款进度”，提交闲鱼订单号。卖家确认到账后，权益会自动进入当前邮箱账号。</small></div></div>' : '<div class="redeem-card"><div><b>闲鱼兑换码</b><small>已在闲鱼付款？把卖家发给你的兑换码填在这里。</small></div><div><input id="redeemCode" maxlength="20" placeholder="例如 XQ-ABCD-EFGH-JKLM"><button data-login-action="redeem">确认兑换</button></div><p id="redeemError"></p></div>'}
         <h3>最近订单</h3>
-        <div class="order-list">${orders.length ? orders.map(order => `<div><span><b>${escapeHTML(order.orderNo)}</b><small>${order.planName} · ${order.methodName}</small></span><em>${orderStatusLabel(order.status)}</em></div>`).join('') : '<p>还没有付费订单。每天前 3 次下载免费，不着急。</p>'}</div>
+        <div class="order-list">${orders.length ? orders.map(order => `<div><span><b>${escapeHTML(order.orderNo)}</b><small>${order.planName} · ${order.methodName}</small></span><span class="order-list-status"><em>${orderStatusLabel(order.status)}</em>${['PENDING', 'VERIFYING'].includes(order.status) ? `<button data-login-action="open-order" data-order-no="${escapeHTML(order.orderNo)}">查看付款进度</button>` : ''}</span></div>`).join('') : '<p>还没有付费订单。每天前 3 次下载免费，不着急。</p>'}</div>
         <button class="account-logout" data-login-action="logout">退出当前账号</button>
       </section>`;
   }
@@ -881,6 +1061,12 @@ function bindLoginActions(overlay = document.querySelector('#loginOverlay')) {
       }
     }
     if (action === 'logout') logoutUser();
+    if (action === 'open-order') {
+      const order = loadOrders().find(item => item.orderNo === button.dataset.orderNo);
+      if (!order) return showToast('订单资料正在同步，请稍后再试');
+      overlay.remove();
+      reopenXianyuOrder(order);
+    }
     if (action === 'redeem') {
       const code = overlay.querySelector('#redeemCode')?.value.trim().toUpperCase() || '';
       const errorBox = overlay.querySelector('#redeemError');
@@ -951,6 +1137,20 @@ function removeLoginOverlays() {
   document.querySelectorAll('.login-overlay').forEach(overlay => overlay.remove());
 }
 
+function continuePendingActionAfterLogin() {
+  if (pendingAfterLogin?.startsWith('download:')) {
+    const format = pendingAfterLogin.split(':')[1] || 'word';
+    pendingAfterLogin = null;
+    setTimeout(() => requestDownload(format), 350);
+    return;
+  }
+  if (pendingAfterLogin?.startsWith('english:')) {
+    const sourceType = pendingAfterLogin.split(':')[1] || state.englishSourceType || 'original';
+    pendingAfterLogin = null;
+    setTimeout(() => beginEnglishGeneration(sourceType, state.englishSource), 350);
+  }
+}
+
 function completeServerLogin(user, silent = false) {
   state.user = normalizeServerUser(user);
   state.entitlement = { plan: 'none', credits: 0 };
@@ -960,11 +1160,7 @@ function completeServerLogin(user, silent = false) {
   removeLoginOverlays();
   if (!silent) showToast(`登录成功，今日免费额度剩余 ${state.user?.freeCredits ?? 0} 次`);
   syncServerSession();
-  if (pendingAfterLogin?.startsWith('download:')) {
-    const format = pendingAfterLogin.split(':')[1] || 'word';
-    pendingAfterLogin = null;
-    setTimeout(() => requestDownload(format), 350);
-  }
+  continuePendingActionAfterLogin();
 }
 
 function completeLogin(identity, { isRegistration = false, silent = false } = {}) {
@@ -975,11 +1171,7 @@ function completeLogin(identity, { isRegistration = false, silent = false } = {}
   updateAccountHeader();
   removeLoginOverlays();
   if (!silent) showToast(existing ? '欢迎回来，已识别当前账号' : (isRegistration ? '注册成功，已领取今日 3 次免费下载' : '登录成功，已领取今日 3 次免费下载'));
-  if (pendingAfterLogin?.startsWith('download:')) {
-    const format = pendingAfterLogin.split(':')[1] || 'word';
-    pendingAfterLogin = null;
-    setTimeout(() => requestDownload(format), 350);
-  }
+  continuePendingActionAfterLogin();
 }
 
 function logoutUser() {
@@ -1053,11 +1245,31 @@ async function requestDownload(format = 'word') {
 }
 
 function openPaywall(format = 'word', preferredPlan = 'single') {
-  paymentState = { plan: plans[preferredPlan] ? preferredPlan : 'single', method: 'xianyu', stage: 'choose', orderNo: '', qrCode: '', demo: false, downloadFormat: format };
+  paymentState = { plan: plans[preferredPlan] ? preferredPlan : 'single', method: 'xianyu', stage: 'choose', orderNo: '', xianyuOrderNo: '', qrCode: '', demo: false, downloadFormat: format };
   const overlay = document.createElement('div');
   overlay.className = 'payment-overlay';
   overlay.id = 'paymentOverlay';
   document.body.appendChild(overlay);
+  renderPaymentModal();
+}
+
+function reopenXianyuOrder(order) {
+  stopOrderPolling();
+  document.querySelector('#paymentOverlay')?.remove();
+  paymentState = {
+    plan: plans[order.plan] ? order.plan : 'single',
+    method: 'xianyu',
+    stage: 'xianyu',
+    orderNo: order.orderNo,
+    xianyuOrderNo: order.xianyuClaimNo || '',
+    qrCode: '',
+    demo: false,
+    downloadFormat: 'word'
+  };
+  const paymentOverlay = document.createElement('div');
+  paymentOverlay.className = 'payment-overlay';
+  paymentOverlay.id = 'paymentOverlay';
+  document.body.appendChild(paymentOverlay);
   renderPaymentModal();
 }
 
@@ -1097,7 +1309,7 @@ function renderPaymentModal() {
           <button class="pay-confirm" data-pay-action="create">确认支付 ¥${plan.price}</button>
           <p class="payment-safe">支付信息由微信 / 支付宝安全处理　·　会员到期不自动续费</p>
         ` : `
-          <div class="xianyu-order-intro"><b>先生成网站订单，再去闲鱼付款</b><p>系统会把订单绑定到当前邮箱账号。付款时请把网站订单号发给闲鱼卖家，卖家核对闲鱼订单和金额后，权益自动到账。</p></div>
+          <div class="xianyu-order-intro"><b>先生成网站订单，再去闲鱼付款</b><p>系统会把套餐和当前邮箱账号锁定在网站订单中。付款后回到网页填写闲鱼订单号，卖家核款后权益自动到账。</p><small>特别说明：闲鱼 0.1 元商品只用于发送网站入口，不属于 2.98 元单次或会员套餐。</small></div>
           <div class="payment-total"><span>本次套餐 <small>${plan.name} · 会员到期不自动续费</small></span><strong>¥${plan.price}</strong></div>
           <button class="pay-confirm" data-pay-action="create-xianyu" ${serverApiReady ? '' : 'disabled'}>${serverApiReady ? `生成订单并去闲鱼付款 ¥${plan.price}` : '订单服务配置中'}</button>
           <p class="payment-safe">钱款仍在闲鱼内支付　·　网站不会仅凭“我已付款”发放权益</p>
@@ -1105,18 +1317,24 @@ function renderPaymentModal() {
       </section>`;
   }
   if (paymentState.stage === 'xianyu') {
+    const currentOrder = loadOrders().find(order => order.orderNo === paymentState.orderNo);
+    const claimedOrderNo = currentOrder?.xianyuClaimNo || paymentState.xianyuOrderNo || '';
+    const claimSubmitted = currentOrder?.status === 'VERIFYING' || Boolean(claimedOrderNo);
     overlay.innerHTML = `
       <section class="payment-sheet xianyu-order-sheet" role="dialog" aria-modal="true" aria-label="闲鱼付款订单">
         <button class="payment-close" data-pay-action="close" aria-label="关闭支付">×</button>
         <button class="pay-back" data-pay-action="back">← 返回选择套餐</button>
         <span class="eyebrow">订单已绑定当前账号</span>
-        <h2>去闲鱼付款，并把订单号发给卖家</h2>
-        <p class="login-lead">卖家会同时核对网站订单、闲鱼订单和实付金额。确认一致后，系统自动释放额度。</p>
+        <h2>${claimSubmitted ? '付款信息已提交，等待卖家核款' : '去闲鱼付款，回来提交订单号'}</h2>
+        <p class="login-lead">网站已经记住当前账号和“${escapeHTML(plan.name)}”。卖家会核对闲鱼订单和实付金额，确认一致后系统自动释放对应权益。</p>
         <div class="website-order-number"><span>网站订单号</span><strong>${escapeHTML(paymentState.orderNo)}</strong><button data-pay-action="copy-order">复制订单号</button></div>
-        <ol class="xianyu-pay-steps"><li>复制上方网站订单号。</li><li>前往闲鱼购买“${escapeHTML(plan.name)}”，实付 ¥${plan.price}。</li><li>在闲鱼聊天中把网站订单号发给卖家。</li><li>卖家确认到账后，本页会自动显示成功。</li></ol>
+        <ol class="xianyu-pay-steps"><li>前往闲鱼购买“${escapeHTML(plan.name)}”，实付 ¥${plan.price}；如果之前已经买过这一档，请勿重复付款。</li><li>在对应的闲鱼订单详情复制订单号。</li><li>返回本页提交闲鱼订单号（0.1 元入口订单不能作为会员订单）。</li><li>卖家核款后，本页自动显示成功并发放权益。</li></ol>
         ${xianyuUrl ? `<a class="pay-confirm xianyu-go-button" href="${escapeHTML(xianyuUrl)}" target="_blank" rel="noopener">打开闲鱼商品并付款</a>` : '<button class="pay-confirm" disabled>闲鱼商品链接待配置</button>'}
-        <button class="xianyu-refresh" data-pay-action="refresh-order">我已付款，刷新订单状态</button>
-        <div class="payment-waiting"><i></i> 等待卖家核对到账与发放权益…</div>
+        <div class="xianyu-claim-card ${claimSubmitted ? 'submitted' : ''}">
+          ${claimSubmitted ? `<b>✓ 已提交闲鱼订单号</b><strong>${escapeHTML(claimedOrderNo)}</strong><p>你可以先离开此页。卖家确认到账后，会员或单次额度会进入当前账号。</p>` : `<b>我已经在闲鱼付款</b><p>请填写闲鱼“订单详情”中的订单号，不要填写商品链接或网站订单号。</p><div><input id="xianyuClaimOrder" inputmode="numeric" maxlength="64" placeholder="请输入闲鱼订单号"><button data-pay-action="submit-xianyu-claim">提交付款信息</button></div><small id="xianyuClaimError"></small>`}
+        </div>
+        <button class="xianyu-refresh" data-pay-action="refresh-order">刷新核款结果</button>
+        <div class="payment-waiting"><i></i> ${claimSubmitted ? '卖家核款中，确认后自动到账…' : '付款后需要提交闲鱼订单号，网页才能识别这笔付款'}</div>
         <p class="order-number">订单只绑定账号：${escapeHTML(state.user?.email || state.user?.id || '')}</p>
       </section>`;
   }
@@ -1196,6 +1414,33 @@ function bindPaymentActions() {
       await navigator.clipboard.writeText(paymentState.orderNo);
       button.textContent = '已复制，请发给闲鱼卖家';
     }
+    if (action === 'submit-xianyu-claim') {
+      const input = overlay.querySelector('#xianyuClaimOrder');
+      const errorBox = overlay.querySelector('#xianyuClaimError');
+      const xianyuOrderNo = input?.value.trim() || '';
+      if (xianyuOrderNo.length < 6 || xianyuOrderNo.length > 64 || /\s/.test(xianyuOrderNo)) {
+        errorBox.textContent = '请填写闲鱼订单详情中的完整订单号';
+        return;
+      }
+      button.disabled = true;
+      button.textContent = '正在绑定付款…';
+      try {
+        const result = await apiRequest('/api/order-claim', { method: 'POST', body: { website_order_no: paymentState.orderNo, xianyu_order_no: xianyuOrderNo } });
+        const order = normalizeServerOrder(result.order);
+        paymentState.xianyuOrderNo = order.xianyuClaimNo;
+        saveOrder(order);
+        renderPaymentModal();
+        showToast('付款信息已提交，卖家核款后权益自动到账');
+      } catch (error) {
+        button.disabled = false;
+        button.textContent = '提交付款信息';
+        const messages = {
+          404: '没有找到当前网站订单，请重新下单',
+          409: '该闲鱼订单号已绑定其他订单，请检查后联系客服'
+        };
+        errorBox.textContent = messages[error.status] || '提交失败，请检查订单号后重试';
+      }
+    }
     if (action === 'refresh-order') await refreshXianyuOrder(true);
     if (action === 'create') {
       const chosenPlan = plans[paymentState.plan];
@@ -1254,6 +1499,7 @@ function startOrderPolling() {
       const data = await apiRequest(`/api/orders?order_no=${encodeURIComponent(paymentState.orderNo)}`);
       const order = normalizeServerOrder(data.order);
       saveOrder(order);
+      paymentState.xianyuOrderNo = order.xianyuClaimNo || paymentState.xianyuOrderNo;
       if (order.status === 'FULFILLED') {
         stopOrderPolling();
         await syncServerSession();
@@ -1276,6 +1522,7 @@ async function refreshXianyuOrder(showPendingToast = false) {
     const data = await apiRequest(`/api/orders?order_no=${encodeURIComponent(paymentState.orderNo)}`);
     const order = normalizeServerOrder(data.order);
     saveOrder(order);
+    paymentState.xianyuOrderNo = order.xianyuClaimNo || paymentState.xianyuOrderNo;
     if (order.status === 'FULFILLED') {
       stopOrderPolling();
       await syncServerSession();
@@ -1377,9 +1624,10 @@ function consumeLocalDownloadCredit() {
 }
 
 function exportWord(content) {
-  const name = state.form.name || '我的';
-  const filename = `${name}-${state.form.position || '求职'}-2页优化简历.doc`;
-  const word = `<!doctype html><html><head><meta charset="UTF-8"><style>@page{size:A4;margin:1.7cm}body{font-family:'Microsoft YaHei',Arial,sans-serif;color:#18352e;line-height:1.62;margin:0}.resume-page{min-height:24.5cm;position:relative}.resume-page+.resume-page{page-break-before:always}h1{font-size:25px;letter-spacing:4px;margin:0 0 8px}h2{font-size:13px;border-left:4px solid #ef765f;padding-left:8px;margin:22px 0 11px;letter-spacing:1px}h3{font-size:12px;color:#275f50;margin:7px 0}p,li{font-size:11px;margin-top:3px}.resume-head{border-bottom:2px solid #18352e;padding-bottom:16px;display:flex;justify-content:space-between}.resume-contact{text-align:right;font-size:10px}.experience{margin-bottom:16px}.experience-title{display:flex;justify-content:space-between;font-size:11px}.competency-grid{display:table;width:100%;border-spacing:5px}.competency-grid span{display:table-cell;background:#f2f6f3;padding:7px;font-size:9px;text-align:center}.resume-page-title{border-bottom:2px solid #18352e;padding-bottom:14px;display:flex;justify-content:space-between}.skills-list p{margin:5px 0}.page-number{position:absolute;right:0;bottom:0;font-size:9px;color:#999}</style></head><body>${content}</body></html>`;
+  const english = state.resumeLanguage === 'en';
+  const name = english ? (state.englishResult?.name || state.form.name || 'Candidate') : (state.form.name || '我的');
+  const filename = english ? `${name}-English-Resume.doc` : `${name}-${state.form.position || '求职'}-2页优化简历.doc`;
+  const word = `<!doctype html><html><head><meta charset="UTF-8"><style>@page{size:A4;margin:1.7cm}body{font-family:${english ? "Arial,'Helvetica Neue',sans-serif" : "'Microsoft YaHei',Arial,sans-serif"};color:#18352e;line-height:1.62;margin:0}.resume-page{min-height:24.5cm;position:relative}.resume-page+.resume-page{page-break-before:always}h1{font-size:25px;letter-spacing:${english ? '.5px' : '4px'};margin:0 0 8px}h2{font-size:13px;border-left:4px solid #ef765f;padding-left:8px;margin:22px 0 11px;letter-spacing:1px}h3{font-size:12px;color:#275f50;margin:7px 0}p,li{font-size:11px;margin-top:3px}.resume-head{border-bottom:2px solid #18352e;padding-bottom:16px;display:flex;justify-content:space-between}.resume-contact{text-align:right;font-size:10px}.experience{margin-bottom:16px}.experience-title{display:flex;justify-content:space-between;font-size:11px}.competency-grid{display:table;width:100%;border-spacing:5px}.competency-grid span{display:table-cell;background:#f2f6f3;padding:7px;font-size:9px;text-align:center}.resume-page-title{border-bottom:2px solid #18352e;padding-bottom:14px;display:flex;justify-content:space-between}.skills-list p{margin:5px 0}.page-number{position:absolute;right:0;bottom:0;font-size:9px;color:#999}</style></head><body>${content}</body></html>`;
   const blob = new Blob(['\ufeff', word], { type: 'application/msword' });
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
@@ -1395,16 +1643,17 @@ function exportWord(content) {
     status.classList.add('show');
     status.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   }
-  showToast('已开始下载 2 页 Word 简历');
+  showToast(english ? '已开始下载英文 Word 简历' : '已开始下载 2 页 Word 简历');
 }
 
 function exportPdf(content) {
-  const name = state.form.name || '我的';
-  const filename = `${name}-${state.form.position || '求职'}-2页优化简历.pdf`;
+  const english = state.resumeLanguage === 'en';
+  const name = english ? (state.englishResult?.name || state.form.name || 'Candidate') : (state.form.name || '我的');
+  const filename = english ? `${name}-English-Resume.pdf` : `${name}-${state.form.position || '求职'}-2页优化简历.pdf`;
   const frame = document.createElement('iframe');
   frame.className = 'pdf-print-frame';
   frame.setAttribute('title', 'PDF 导出窗口');
-  frame.srcdoc = `<!doctype html><html><head><meta charset="UTF-8"><title>${escapeHTML(filename)}</title><style>@page{size:A4;margin:1.7cm}*{box-sizing:border-box}body{font-family:'Microsoft YaHei',Arial,sans-serif;color:#18352e;line-height:1.62;margin:0}.resume-page{min-height:24.5cm;position:relative;page-break-after:always}.resume-page:last-child{page-break-after:auto}h1{font-size:25px;letter-spacing:4px;margin:0 0 8px}h2{font-size:13px;border-left:4px solid #ef765f;padding-left:8px;margin:22px 0 11px;letter-spacing:1px}h3{font-size:12px;color:#275f50;margin:7px 0}p,li{font-size:11px;margin-top:3px}.resume-head{border-bottom:2px solid #18352e;padding-bottom:16px;display:flex;justify-content:space-between}.resume-contact{text-align:right;font-size:10px}.experience{margin-bottom:16px}.experience-title,.resume-page-title{display:flex;justify-content:space-between}.competency-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:5px}.competency-grid span{background:#f2f6f3;padding:7px;font-size:9px;text-align:center}.skills-list p{margin:5px 0}.page-number{position:absolute;right:0;bottom:0;font-size:9px;color:#999}</style></head><body>${content}</body></html>`;
+  frame.srcdoc = `<!doctype html><html><head><meta charset="UTF-8"><title>${escapeHTML(filename)}</title><style>@page{size:A4;margin:1.7cm}*{box-sizing:border-box}body{font-family:${english ? "Arial,'Helvetica Neue',sans-serif" : "'Microsoft YaHei',Arial,sans-serif"};color:#18352e;line-height:1.62;margin:0}.resume-page{min-height:24.5cm;position:relative;page-break-after:always}.resume-page:last-child{page-break-after:auto}h1{font-size:25px;letter-spacing:${english ? '.5px' : '4px'};margin:0 0 8px}h2{font-size:13px;border-left:4px solid #ef765f;padding-left:8px;margin:22px 0 11px;letter-spacing:1px}h3{font-size:12px;color:#275f50;margin:7px 0}p,li{font-size:11px;margin-top:3px}.resume-head{border-bottom:2px solid #18352e;padding-bottom:16px;display:flex;justify-content:space-between}.resume-contact{text-align:right;font-size:10px}.experience{margin-bottom:16px}.experience-title,.resume-page-title{display:flex;justify-content:space-between}.competency-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:5px}.competency-grid span{background:#f2f6f3;padding:7px;font-size:9px;text-align:center}.skills-list p{margin:5px 0}.page-number{position:absolute;right:0;bottom:0;font-size:9px;color:#999}</style></head><body>${content}</body></html>`;
   frame.addEventListener('load', () => {
     setTimeout(() => {
       try {
@@ -1453,6 +1702,13 @@ document.addEventListener('keydown', event => {
     document.querySelector('#paymentOverlay')?.remove();
     document.querySelector('#loginOverlay')?.remove();
   }
+});
+
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && paymentState.stage === 'xianyu' && paymentState.orderNo) refreshXianyuOrder(false);
+});
+window.addEventListener('focus', () => {
+  if (paymentState.stage === 'xianyu' && paymentState.orderNo) refreshXianyuOrder(false);
 });
 
 loadDraft();
